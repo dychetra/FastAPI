@@ -33,7 +33,7 @@
   input, select { width:100%; padding:11px 12px; font:inherit; font-size:16px; border:1px solid var(--line);
                   border-radius:8px; background:#fff; }
   input:focus { outline:2px solid var(--accent); border-color:transparent; }
-  button.btn { padding:11px 14px; font:inherit; font-size:15px; border-radius:8px; border:1px solid var(--line);
+  .btn { display:inline-block; padding:11px 14px; font:inherit; font-size:15px; border-radius:8px; border:1px solid var(--line);
                background:#fff; cursor:pointer; }
   button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
   button.danger { color:var(--bad); }
@@ -120,6 +120,11 @@
       <div id="suggest" class="msg ok hidden" style="display:flex;gap:10px;align-items:center">
         <img id="suggestImg" alt="" style="width:56px;height:56px;object-fit:contain;border-radius:6px;background:#fff" class="hidden">
         <div id="suggestText"></div>
+      </div>
+      <div id="suggestTools" class="row hidden" style="margin-top:8px;flex-wrap:wrap">
+        <a id="googleBtn" class="btn" target="_blank" rel="noopener"
+           style="text-decoration:none;color:inherit;text-align:center">🔍 Search name on Google</a>
+        <button type="button" class="btn" id="retryBtn">↻ Try again</button>
       </div>
       <label>Barcode · លេខបាកូដ</label>
       <input id="fBarcode" required>
@@ -304,19 +309,33 @@ async function openForm(it, isNew) {
 // and pre-fill the name and category (only if the user has not typed yet).
 async function suggestName(code) {
   $("#suggestText").textContent = "Looking up product name online… · កំពុងស្វែងរកឈ្មោះ…";
-  hide("#suggestImg"); show("#suggest");
+  $("#suggest").className = "msg ok"; hide("#suggestImg"); hide("#suggestTools"); show("#suggest");
+  $("#googleBtn").href = "https://www.google.com/search?q=" + encodeURIComponent(code);
+  $("#retryBtn").onclick = () => suggestName(code);
   let r = null;
   try { r = await api("/api/lookup/" + encodeURIComponent(code)); } catch {}
   if ($("#fBarcode").value.trim() !== code || $("#form").classList.contains("hidden")) return;
-  if (!r || !r.found) {
-    $("#suggestText").textContent = "Name not found online — please type it. · រកឈ្មោះមិនឃើញ សូមវាយបញ្ចូល";
+  if (r && r.found) {
+    if (!$("#fName").value.trim()) $("#fName").value = r.name;
+    if (!$("#fCategory").value.trim() && r.category) $("#fCategory").value = r.category;
+    $("#suggestText").innerHTML = `Found: <b>${esc(r.name)}</b><br><span class="meta">from ${esc(r.source)} — check the name, then enter the price</span>`;
+    if (r.image_url) { $("#suggestImg").src = r.image_url; show("#suggestImg"); }
+    $("#fPrice").focus();
     return;
   }
-  if (!$("#fName").value.trim()) $("#fName").value = r.name;
-  if (!$("#fCategory").value.trim() && r.category) $("#fCategory").value = r.category;
-  $("#suggestText").innerHTML = `Found: <b>${esc(r.name)}</b><br><span class="meta">from ${esc(r.source)} — check the name, then enter the price</span>`;
-  if (r.image_url) { $("#suggestImg").src = r.image_url; show("#suggestImg"); }
-  $("#fPrice").focus();
+  // not found (or no internet): help the user find the name quickly
+  $("#suggest").className = "msg warn";
+  let html = (!r || r.error)
+    ? "Could not reach the online product list (check internet). · មិនអាចភ្ជាប់អ៊ីនធឺណិត"
+    : "Name not in the free online list — please type it. · រកឈ្មោះមិនឃើញ សូមវាយបញ្ចូល";
+  if (r && r.similar) {
+    html += `<br><span class="meta">Same company as <b>${esc(r.similar.name)}</b> in your shop</span>`;
+    if (!$("#fCategory").value.trim() && r.similar.category) $("#fCategory").value = r.similar.category;
+  }
+  $("#suggestText").innerHTML = html;
+  $("#retryBtn").classList.toggle("hidden", !(!r || r.error));
+  show("#suggestTools");
+  $("#fName").focus();
 }
 const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
 $("#form").onsubmit = async e => {

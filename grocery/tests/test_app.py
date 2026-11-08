@@ -202,3 +202,27 @@ def test_category_rules():
     assert main.guess_category(beer, "Open Food Facts") == "Beer & Alcohol"
     assert main.guess_category({"categories_tags": ["en:instant-noodles"]}, "x") == "Noodles"
     assert main.guess_category({}, "Open Products Facts") == "Household"
+
+
+def test_lookup_network_error_is_not_cached(client, monkeypatch):
+    import main
+    calls = fake_sources(monkeypatch, {"https://world.openfoodfacts.org": main.LOOKUP_ERROR})
+    r = client.get("/api/lookup/8851959132012").json()
+    assert r["found"] is False and r["error"] is True
+    fake_sources(monkeypatch, {"https://world.openfoodfacts.org": COKE_TH})  # internet back
+    assert client.get("/api/lookup/8851959132012").json()["found"] is True
+
+
+def test_lookup_suggests_same_company_item(client, monkeypatch):
+    fake_sources(monkeypatch, {})
+    client.put("/api/items/8841234500017", json=item(barcode="8841234500017",
+               name="Kampot Pepper 50g", category="Cooking"))
+    r = client.get("/api/lookup/8841234500024").json()     # same company, other product
+    assert r["found"] is False
+    assert r["similar"]["name"] == "Kampot Pepper 50g" and r["similar"]["category"] == "Cooking"
+    assert client.get("/api/lookup/8859999999994").json()["similar"] is None
+
+
+def test_healthz_version_and_page_not_cached(client):
+    assert client.get("/healthz").json()["version"]
+    assert client.get("/").headers["cache-control"] == "no-cache"

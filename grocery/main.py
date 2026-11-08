@@ -145,7 +145,8 @@ def to_out(row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-app = FastAPI(title="ScanPrice", version="1.2.0")
+APP_VERSION = "1.4.0"
+app = FastAPI(title="ScanPrice", version=APP_VERSION)
 init_db()
 
 # Open without login: health check, plus the app name/icons so phones can show
@@ -184,7 +185,7 @@ async def require_password(request: Request, call_next):
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    info = {"ok": True, "database": database.backend_name()}
+    info = {"ok": True, "version": APP_VERSION, "database": database.backend_name()}
     if info["database"] == "sqlite":
         raw = os.environ.get("DATABASE_URL", "").strip()
         info["hint"] = (
@@ -196,7 +197,9 @@ def healthz():
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    return FileResponse(BASE_DIR / "static" / "index.html")
+    # no-cache: phones always check for the newest version of the app
+    return FileResponse(BASE_DIR / "static" / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -418,7 +421,7 @@ LOOKUP_SOURCES = [
     ("Open Products Facts", "https://world.openproductsfacts.org"),
 ]
 LOOKUP_FIELDS = "product_name,product_name_en,brands,quantity,categories_tags,image_front_small_url"
-USER_AGENT = "ScanPrice/1.3 (family grocery price app)"
+USER_AGENT = "ScanPrice/1.4 (family grocery price app)"
 _lookup_cache: dict[str, dict] = {}
 
 # first matching tag wins; order matters (beer before generic beverages)
@@ -464,17 +467,28 @@ def guess_category(p: dict, source: str) -> str:
     return ""
 
 
+LOOKUP_ERROR = {"_error": True}  # network problem: try again next time
+
+
 async def fetch_product(client: httpx.AsyncClient, base: str, barcode: str) -> Optional[dict]:
-    """One database; returns the product dict or None. Never raises."""
+    """One database: the product dict, None if not listed, LOOKUP_ERROR on failure."""
     try:
         r = await client.get(f"{base}/api/v2/product/{barcode}.json",
                              params={"fields": LOOKUP_FIELDS})
-        if r.status_code != 200:
+        if r.status_code == 404:
             return None
+        if r.status_code != 200:
+            return LOOKUP_ERROR
         data = r.json()
         return data.get("product") if data.get("status") == 1 else None
     except (httpx.HTTPError, ValueError):
-        return None
+        return LOOKUP_ERROR
+
+
+class Similar(BaseModel):
+    barcode: str
+    name: str
+    category: str
 
 
 class LookupOut(BaseModel):
@@ -484,6 +498,30 @@ class LookupOut(BaseModel):
     category: str = ""
     image_url: str = ""
     source: str = ""
+    error: bool = False               # online databases could not be reached
+    similar: Optional[Similar] = None  # item in this shop from the same company
+
+
+def same_company_item(barcode: str) -> Optional[Similar]:
+    """Saved item whose barcode shares the longest start (company prefix, >= 7 digits).
+
+    GS1 barcodes begin with the maker's company number, so a match usually
+    means same brand, e.g. another flavour or size.
+    """
+    best, best_len = None, 6
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT barcode,name,category FROM items WHERE barcode LIKE ? AND barcode <> ?",
+            (barcode[:7] + "%", barcode)).fetchall()
+    for r in rows:
+        n = 0
+        for a, b in zip(r["barcode"], barcode):
+            if a != b:
+                break
+            n += 1
+        if n > best_len and len(r["barcode"]) == len(barcode):
+            best, best_len = r, n
+    return Similar(barcode=best["barcode"], name=best["name"], category=best["category"]) if best else None
 
 
 @app.get("/api/lookup/{barcode}", response_model=LookupOut)
@@ -492,21 +530,24 @@ async def lookup_online(barcode: str):
     barcode = barcode.strip()
     if not re.fullmatch(r"\d{6,14}", barcode):  # only real product barcodes
         return LookupOut(found=False, barcode=barcode)
+    similar = same_company_item(barcode)
     if barcode in _lookup_cache:
-        return LookupOut(**_lookup_cache[barcode])
-    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": USER_AGENT},
+        return LookupOut(**_lookup_cache[barcode], similar=similar)
+    async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": USER_AGENT},
                                  follow_redirects=True) as client:
         results = await asyncio.gather(
             *(fetch_product(client, base, barcode) for _, base in LOOKUP_SOURCES))
-    out = {"found": False, "barcode": barcode}
+    out = {"found": False, "barcode": barcode,
+           "error": any(r is LOOKUP_ERROR for r in results)}
     for (source, _), product in zip(LOOKUP_SOURCES, results):
-        if product and build_name(product):
+        if product and product is not LOOKUP_ERROR and build_name(product):
             out = {"found": True, "barcode": barcode, "name": build_name(product),
                    "category": guess_category(product, source),
                    "image_url": product.get("image_front_small_url") or "",
                    "source": source}
             break
-    if len(_lookup_cache) > 2000:
-        _lookup_cache.clear()
-    _lookup_cache[barcode] = out
-    return LookupOut(**out)
+    if not out.get("error"):          # never remember a failed lookup
+        if len(_lookup_cache) > 2000:
+            _lookup_cache.clear()
+        _lookup_cache[barcode] = out
+    return LookupOut(**out, similar=similar)
