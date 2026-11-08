@@ -5,6 +5,7 @@ services:
     name: grocery-price-tracker
     runtime: python
     plan: free
+    region: singapore   # same region as the Neon database = fast scans
     rootDir: grocery
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
