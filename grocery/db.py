@@ -23,7 +23,18 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def database_url() -> str:
-    return os.environ.get("DATABASE_URL", "").strip()
+    """The connection string, cleaned of common copy-paste extras.
+
+    Neon's "Connect" box can copy it as  psql 'postgresql://...'  and people
+    often paste it with quotes or spaces; keep only the postgresql://... part.
+    """
+    url = os.environ.get("DATABASE_URL", "").strip()
+    for prefix in ("postgresql://", "postgres://"):
+        i = url.find(prefix)
+        if i > 0:
+            url = url[i:]
+            break
+    return url.strip().strip("'\"").strip()
 
 
 def is_postgres() -> bool:

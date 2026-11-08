@@ -131,3 +131,20 @@ def test_password_required_when_set(tmp_path, monkeypatch, backend):
     assert c.get("/static/manifest.webmanifest").json()["short_name"] == "ScanPrice"
     assert c.get("/static/apple-touch-icon.png").status_code == 200
     assert c.get("/static/index.html").status_code == 401  # the app itself stays locked
+
+
+@pytest.mark.parametrize("pasted", [
+    "psql 'postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require'",
+    '  "postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require"  ',
+    "postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require\n",
+])
+def test_database_url_cleans_copy_paste(monkeypatch, pasted):
+    import db
+    monkeypatch.setenv("DATABASE_URL", pasted)
+    assert db.database_url() == "postgresql://u:p@ep-x.neon.tech/neondb?sslmode=require"
+    assert db.is_postgres()
+
+
+def test_healthz_hint_when_not_postgres(tmp_path, monkeypatch):
+    c = make_client(tmp_path, monkeypatch, "sqlite")
+    assert "not set" in c.get("/healthz").json()["hint"]

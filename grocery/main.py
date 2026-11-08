@@ -180,7 +180,14 @@ async def require_password(request: Request, call_next):
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"ok": True, "database": database.backend_name()}
+    info = {"ok": True, "database": database.backend_name()}
+    if info["database"] == "sqlite":
+        raw = os.environ.get("DATABASE_URL", "").strip()
+        info["hint"] = (
+            "DATABASE_URL is not set in Render > Environment" if not raw else
+            "DATABASE_URL is set but does not contain postgresql:// - copy it again from Neon"
+        )
+    return info
 
 
 @app.get("/", include_in_schema=False)
