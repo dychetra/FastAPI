@@ -110,4 +110,31 @@ def schema() -> list[str]:
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         )""",
+        # one row per finished sale; amounts in KHR at the sale's own rate
+        f"""CREATE TABLE IF NOT EXISTS sales (
+            id          {pk},
+            created_at  TEXT    NOT NULL,
+            day         TEXT    NOT NULL,
+            rate        {num}   NOT NULL,
+            items_count INTEGER NOT NULL,
+            total_khr   {num}   NOT NULL,
+            total_usd   {num}   NOT NULL,
+            cost_khr    {num},
+            paid_usd    {num}   NOT NULL DEFAULT 0,
+            paid_khr    {num}   NOT NULL DEFAULT 0,
+            change_khr  {num}   NOT NULL DEFAULT 0
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_sales_day ON sales(day)",
+        f"""CREATE TABLE IF NOT EXISTS sale_items (
+            id          {pk},
+            sale_id     INTEGER NOT NULL,
+            barcode     TEXT    NOT NULL,
+            name        TEXT    NOT NULL,
+            qty         INTEGER NOT NULL,
+            price       {num}   NOT NULL,
+            currency    TEXT    NOT NULL,
+            line_khr    {num}   NOT NULL,
+            cost        {num}
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_sale_items_sale ON sale_items(sale_id)",
     ]

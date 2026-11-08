@@ -7,6 +7,8 @@ the item is new, type its name and price once and it is saved.
 - Prices saved in **USD or KHR**, always shown in **both** (KHR rounded to nearest 100 ៛)
 - Your own **exchange rate** (default 4,100), changeable in Settings
 - Optional **cost** → shows **margin %**; optional **stock qty** → stock value
+- **🧾 Sell screen**: scan items into a basket (camera keeps scanning), total in $ and ៛,
+  change in riel or dollars + riel, stock counts down, today's sales and profit
 - **Price history** for every item; **CSV export** that opens in Excel (Khmer text OK)
 
 The app is in [`grocery/`](grocery/). It uses FastAPI with either:

@@ -22,7 +22,7 @@
   header h1 { margin:0; font-size:18px; }
   header small { opacity:.85; }
   nav { display:flex; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
-  nav button { flex:1; padding:12px 4px; border:0; background:none; font:inherit; font-size:15px;
+  nav button { flex:1; padding:8px 2px; line-height:1.25; border:0; background:none; font:inherit; font-size:15px;
                color:var(--muted); border-bottom:3px solid transparent; cursor:pointer; }
   nav button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
   main { max-width:720px; margin:0 auto; padding:16px; }
@@ -63,6 +63,12 @@
   tr.click:hover { background:#f9fafb; }
   .history li { font-size:14px; margin:3px 0; }
   .stat { font-size:24px; font-weight:700; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chips button { flex:1 0 22%; padding:10px 2px; font-size:14px; }
+  .qty { display:inline-flex; align-items:center; gap:6px; }
+  .qty button { width:34px; height:34px; border:1px solid var(--line); border-radius:8px; background:#fff; font-size:18px; }
+  .qty b { min-width:22px; text-align:center; }
+  .x { border:0; background:none; color:var(--bad); font-size:16px; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -71,9 +77,10 @@
   <small id="rateLabel">1 USD = … KHR</small>
 </header>
 <nav>
-  <button data-tab="scan" class="on">📷 Scan · ស្កេន</button>
-  <button data-tab="items">📦 Items · ទំនិញ</button>
-  <button data-tab="settings">⚙️ Settings · ការកំណត់</button>
+  <button data-tab="scan" class="on">📷 Scan<br><small>ស្កេន</small></button>
+  <button data-tab="sell">🧾 Sell<br><small>លក់</small></button>
+  <button data-tab="items">📦 Items<br><small>ទំនិញ</small></button>
+  <button data-tab="settings">⚙️ Settings<br><small>ការកំណត់</small></button>
 </nav>
 
 <main>
@@ -91,6 +98,7 @@
         <button class="btn" id="photoBtn">🖼 Take photo · ថតរូប</button>
       </div>
       <input id="photoInput" type="file" accept="image/*" capture="environment" class="hidden">
+      <div id="scanCamSlot"><div id="camBox">
       <div id="reader" class="hidden"><video id="video" playsinline muted></video><div class="guide"></div></div>
       <div id="camTools" class="row hidden" style="margin-top:8px">
         <button class="btn hidden" id="torchBtn">🔦 Light · ភ្លើង</button>
@@ -100,6 +108,7 @@
         កាន់បាកូដឲ្យត្រង់ ចម្ងាយ ១៥–២០ សង់ទីម៉ែត្រ
       </div>
       <div id="camMsg" class="msg warn hidden"></div>
+      </div></div>
     </div>
 
     <div id="result" class="card hidden">
@@ -159,6 +168,62 @@
         <button type="button" class="btn danger hidden" id="deleteBtn">🗑 Delete item · លុប</button>
       </div>
     </form>
+  </section>
+
+  <!-- ============ SELL ============ -->
+  <section id="tab-sell" class="hidden">
+    <div class="card">
+      <label for="sellCode">Scan items · ស្កេនទំនិញ (camera, USB scanner, or type + Enter)</label>
+      <div class="row">
+        <input id="sellCode" inputmode="numeric" autocomplete="off" placeholder="Barcode">
+        <button class="btn primary" style="flex:0 0 auto" id="sellAdd">Add · បន្ថែម</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="sellCamBtn">📷 Camera (keeps scanning) · កាមេរ៉ា</button>
+      </div>
+      <div id="sellCamSlot"></div>
+      <div id="sellMsg" class="msg warn hidden"></div>
+    </div>
+
+    <div class="card" style="padding:8px">
+      <table>
+        <thead><tr><th>Item · ទំនិញ</th><th class="num">Qty</th><th class="num">Amount</th><th></th></tr></thead>
+        <tbody id="basket"></tbody>
+      </table>
+      <div id="basketEmpty" class="meta" style="padding:14px;text-align:center">
+        Basket is empty — scan items to sell · កន្ត្រកទទេ</div>
+    </div>
+
+    <div class="card">
+      <div class="meta">TOTAL · សរុប</div>
+      <div class="price-big" id="totKhr">0 ៛</div>
+      <div class="price-alt" id="totUsd">$0.00</div>
+      <label>Customer pays · អតិថិជនបង់</label>
+      <div class="row">
+        <input id="payUsd" type="number" min="0" step="any" inputmode="decimal" placeholder="$ dollars">
+        <input id="payKhr" type="number" min="0" step="100" inputmode="numeric" placeholder="៛ riel">
+      </div>
+      <div class="chips">
+        <button class="btn" data-usd="1">+$1</button><button class="btn" data-usd="5">+$5</button>
+        <button class="btn" data-usd="10">+$10</button><button class="btn" data-usd="20">+$20</button>
+        <button class="btn" data-khr="1000">+1,000៛</button><button class="btn" data-khr="5000">+5,000៛</button>
+        <button class="btn" data-khr="10000">+10,000៛</button><button class="btn" data-khr="20000">+20,000៛</button>
+        <button class="btn" data-khr="50000">+50,000៛</button><button class="btn" id="payExact">Exact · គ្រប់</button>
+        <button class="btn" id="payClear">Clear · លុប</button>
+      </div>
+      <div id="changeBox" class="msg hidden" style="font-size:18px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="finishSale">✅ Finish sale · បញ្ចប់ការលក់</button>
+        <button class="btn" id="clearBasket" style="flex:0 0 auto" title="Empty basket">🗑</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="meta">Today's sales · ការលក់ថ្ងៃនេះ</div>
+      <div class="stat" id="todayTotal">–</div>
+      <div class="meta" id="todayInfo"></div>
+      <table style="margin-top:8px"><tbody id="todayList"></tbody></table>
+    </div>
   </section>
 
   <!-- ============ ITEMS ============ -->
@@ -225,10 +290,11 @@ let RATE = 4100, current = null, currency = "USD";
 // ---------- tabs ----------
 document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
-  ["scan", "items", "settings"].forEach(t => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  stopCamera();
+  ["scan", "sell", "items", "settings"].forEach(t => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
   if (b.dataset.tab === "items") loadList();
   if (b.dataset.tab === "settings") loadSummary();
-  if (b.dataset.tab !== "scan") stopCamera();
+  if (b.dataset.tab === "sell") { renderBasket(); loadToday(); }
 });
 
 // ---------- rate ----------
@@ -452,8 +518,13 @@ async function detectIn(source, det) {
 
 let stream = null, track = null, torchOn = false;
 const work = document.createElement("canvas");
-$("#camBtn").onclick = async () => {
+// onCode(code) is called for each barcode read. continuous=false: stop after
+// the first read (Scan tab). continuous=true: keep scanning (Sell tab).
+let camButton = null;
+$("#camBtn").onclick = () => startCamera($("#camBtn"), $("#scanCamSlot"), code => lookup(code), false);
+async function startCamera(button, slot, onCode, continuous) {
   if (stream) return stopCamera();
+  slot.appendChild($("#camBox")); camButton = button;
   if (!window.isSecureContext) return camMsg("The camera only works over HTTPS or on localhost. See README → 'Using a phone'.");
   if (!navigator.mediaDevices?.getUserMedia) return camMsg("This browser cannot open the camera. Use 🖼 Take photo or type the number.");
   hide("#camMsg");
@@ -470,7 +541,8 @@ $("#camBtn").onclick = async () => {
   if (caps.torch) { show("#camTools"); show("#torchBtn"); }
   const video = $("#video");
   video.srcObject = stream; show("#reader"); show("#camTip");
-  $("#camBtn").textContent = "⏹ Stop camera · បិទ";
+  button.dataset.label = button.dataset.label || button.textContent;
+  button.textContent = "⏹ Stop camera · បិទ";
   await video.play().catch(() => {});
   lastCode = null;
   const ctx = work.getContext("2d", { willReadFrequently: true });
@@ -486,14 +558,18 @@ $("#camBtn").onclick = async () => {
         let code = await detectIn(work, det);
         if (!code) code = await detectIn(video, det);   // whole frame as a second chance
         if (code && stream) {
-          stopCamera(); lookup(code); return;
+          if (!continuous) { stopCamera(); onCode(code); return; }
+          const now = Date.now();               // same item still in view: wait 1.5 s
+          if (code !== lastAdded.code || now - lastAdded.at > 1500) onCode(code);
+          lastAdded = { code, at: now };
         }
       } catch {}
     }
     setTimeout(tick, 80);
   };
   tick();
-};
+}
+let lastAdded = { code: null, at: 0 };
 $("#torchBtn").onclick = async () => {
   try { torchOn = !torchOn; await track.applyConstraints({ advanced: [{ torch: torchOn }] }); } catch {}
 };
@@ -503,7 +579,8 @@ function stopCamera() {
   stream = null; track = null; torchOn = false;
   $("#video").srcObject = null;
   hide("#reader"); hide("#camTools"); hide("#torchBtn"); hide("#camTip");
-  $("#camBtn").textContent = "📷 Use camera · ប្រើកាមេរ៉ា";
+  if (camButton && camButton.dataset.label) camButton.textContent = camButton.dataset.label;
+  camButton = null; lastAdded = { code: null, at: 0 };
 }
 
 // Photo mode: the phone's normal camera app takes a sharp, focused picture,
@@ -530,6 +607,129 @@ $("#photoInput").onchange = async e => {
   }
 };
 function camMsg(t) { $("#camMsg").textContent = t; show("#camMsg"); }
+
+// ---------- sell / basket ----------
+// Same money rule as the server: lines in riel at the shop rate, total
+// rounded once to 100 ៛, dollars = exact riel / rate.
+let basket = [];
+try { basket = JSON.parse(localStorage.getItem("scanprice.basket") || "[]"); } catch {}
+const roundKhr = n => Math.round(n / 100) * 100;
+const lineKhr = l => (l.currency === "USD" ? l.price * RATE : l.price) * l.qty;
+const basketKhr = () => basket.reduce((t, l) => t + lineKhr(l), 0);
+const money = (v, cur) => cur === "USD" ? usd(v) : khr(roundKhr(v));
+const fieldNum = id => { const v = parseFloat($(id).value); return v > 0 ? v : 0; };
+const paidKhr = () => fieldNum("#payUsd") * RATE + fieldNum("#payKhr");
+
+function sellMsg(html) { if (!html) return hide("#sellMsg"); $("#sellMsg").innerHTML = html; show("#sellMsg"); }
+
+async function addToBasket(code) {
+  code = String(code || "").trim(); if (!code) return;
+  sellMsg("");
+  const line = basket.find(l => l.barcode === code);
+  if (line) { line.qty++; beep("found"); return renderBasket(code); }
+  let it = null;
+  try { it = await api("/api/items/" + encodeURIComponent(code)); }
+  catch { return sellMsg("Cannot reach the database — try again. · មិនអាចភ្ជាប់"); }
+  if (!it) {
+    beep("new");
+    return sellMsg(`Barcode <b>${esc(code)}</b> is not saved yet. · មិនទាន់មានក្នុងបញ្ជី
+      <div style="margin-top:8px"><button class="btn" id="sellNewItem">➕ Add this item</button></div>`),
+      $("#sellNewItem").onclick = () => { document.querySelector('nav button[data-tab="scan"]').click(); lookup(code); };
+  }
+  beep("found");
+  basket.push({ barcode: it.barcode, name: it.name, price: it.price, currency: it.currency, qty: 1 });
+  renderBasket(code);
+}
+
+function renderBasket(flashCode) {
+  localStorage.setItem("scanprice.basket", JSON.stringify(basket));
+  $("#basket").innerHTML = basket.map((l, i) => `
+    <tr${l.barcode === flashCode ? ' style="background:#ecfdf5"' : ""}>
+      <td><b>${esc(l.name)}</b><div class="meta">${money(l.price, l.currency)} each</div></td>
+      <td class="num"><span class="qty"><button data-i="${i}" data-d="-1">−</button><b>${l.qty}</b><button data-i="${i}" data-d="1">+</button></span></td>
+      <td class="num">${money(l.price * l.qty, l.currency)}</td>
+      <td><button class="x" data-del="${i}" title="Remove">✕</button></td>
+    </tr>`).join("");
+  $("#basketEmpty").classList.toggle("hidden", basket.length > 0);
+  document.querySelectorAll("#basket [data-d]").forEach(b => b.onclick = () => {
+    const l = basket[b.dataset.i]; l.qty += Number(b.dataset.d);
+    if (l.qty < 1) basket.splice(b.dataset.i, 1);
+    renderBasket();
+  });
+  document.querySelectorAll("#basket [data-del]").forEach(b => b.onclick = () => {
+    basket.splice(b.dataset.del, 1); renderBasket();
+  });
+  const t = basketKhr();
+  $("#totKhr").textContent = khr(roundKhr(t));
+  $("#totUsd").textContent = "= " + usd(t / RATE) + `  ·  ${basket.reduce((n, l) => n + l.qty, 0)} item(s)`;
+  updateChange();
+}
+
+function updateChange() {
+  const t = basketKhr(), p = paidKhr(), box = $("#changeBox");
+  if (!p || !basket.length) return hide("#changeBox");
+  if (p + 1e-6 < roundKhr(t)) {
+    const due = roundKhr(t) - p;
+    box.className = "msg warn";
+    box.innerHTML = `Still to pay · នៅខ្វះ: <b>${khr(roundKhr(due))}</b> (${usd(due / RATE)})`;
+  } else {
+    const c = p - t, dollars = Math.floor(c / RATE), riel = roundKhr(c - dollars * RATE);
+    box.className = "msg ok";
+    box.innerHTML = `Change · ប្រាក់អាប់: <b>${khr(roundKhr(c))}</b>` +
+      (dollars > 0 ? `<br><span class="meta">or give <b>$${dollars}</b> + <b>${khr(riel)}</b></span>` : "");
+  }
+  show("#changeBox");
+}
+
+$("#sellAdd").onclick = () => { addToBasket($("#sellCode").value); $("#sellCode").value = ""; };
+$("#sellCode").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); addToBasket(e.target.value); e.target.value = ""; }
+});
+$("#sellCamBtn").onclick = () => startCamera($("#sellCamBtn"), $("#sellCamSlot"), addToBasket, true);
+$("#payUsd").oninput = $("#payKhr").oninput = updateChange;
+document.querySelectorAll(".chips [data-usd], .chips [data-khr]").forEach(b => b.onclick = () => {
+  const id = b.dataset.usd ? "#payUsd" : "#payKhr", add = Number(b.dataset.usd || b.dataset.khr);
+  $(id).value = fieldNum(id) + add; updateChange();
+});
+$("#payExact").onclick = () => { $("#payUsd").value = ""; $("#payKhr").value = roundKhr(basketKhr()); updateChange(); };
+$("#payClear").onclick = () => { $("#payUsd").value = ""; $("#payKhr").value = ""; updateChange(); };
+$("#clearBasket").onclick = () => {
+  if (basket.length && !confirm("Empty the basket? · លុបកន្ត្រក?")) return;
+  basket = []; $("#payClear").click(); renderBasket(); sellMsg("");
+};
+$("#finishSale").onclick = async () => {
+  if (!basket.length) return sellMsg("Basket is empty. · កន្ត្រកទទេ");
+  const p = paidKhr();
+  if (p && p + 1e-6 < roundKhr(basketKhr())) return alert("Customer has not paid enough yet. · ប្រាក់មិនគ្រប់");
+  const body = { items: basket.map(l => ({ barcode: l.barcode, qty: l.qty })),
+                 paid_usd: fieldNum("#payUsd"), paid_khr: fieldNum("#payKhr") };
+  $("#finishSale").disabled = true;
+  try {
+    const s = await api("/api/sales", { method: "POST", body: JSON.stringify(body) });
+    stopCamera();
+    basket = []; $("#payUsd").value = ""; $("#payKhr").value = ""; renderBasket(); sellMsg("");
+    flash(`Sale saved ✔ ${khr(s.total_khr)} (${usd(s.total_usd)})` +
+          (s.change_khr ? ` — change ${khr(s.change_khr)}` : "") + " · បានរក្សាទុក");
+    loadToday();
+  } catch (err) { alert("Could not save the sale: " + err.message); }
+  finally { $("#finishSale").disabled = false; }
+};
+
+async function loadToday() {
+  let d; try { d = await api("/api/sales"); } catch { return; }
+  $("#todayTotal").textContent = `${khr(d.total_khr)} · ${usd(d.total_usd)}`;
+  $("#todayInfo").textContent = `${d.sales} sale(s) · ${d.items} item(s)` +
+    (d.profit_usd !== null ? ` · profit ${usd(d.profit_usd)}` : "");
+  $("#todayList").innerHTML = d.list.slice(0, 20).map(s => `
+    <tr><td>${new Date(s.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
+      <td>${s.lines.map(l => `${esc(l.name)}${l.qty > 1 ? " ×" + l.qty : ""}`).join(", ")}</td>
+      <td class="num">${khr(s.total_khr)}</td>
+      <td><button class="x" data-cancel="${s.id}" title="Cancel sale">✕</button></td></tr>`).join("");
+  document.querySelectorAll("#todayList [data-cancel]").forEach(b => b.onclick = async () => {
+    if (!confirm("Cancel this sale? Items go back into stock. · បោះបង់ការលក់?")) return;
+    await api("/api/sales/" + b.dataset.cancel, { method: "DELETE" }); loadToday();
+  });
+}
 
 // ---------- list ----------
 let timer;

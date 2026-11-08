@@ -15,7 +15,7 @@ def make_client(tmp_path, monkeypatch, backend, password=""):
         monkeypatch.setenv("DATABASE_URL", url)
         import psycopg
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("DROP TABLE IF EXISTS items, price_history, settings")
+            c.execute("DROP TABLE IF EXISTS items, price_history, settings, sales, sale_items")
     else:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setenv("GROCERY_DB", str(tmp_path / "test.db"))
@@ -113,7 +113,7 @@ def test_backup_and_restore_roundtrip(client):
     client.put("/api/settings/rate", json={"khr_per_usd": 4100})
     assert client.post("/api/restore", json=snap).status_code == 400  # needs confirm
     r = client.post("/api/restore?confirm=true", json=snap)
-    assert r.json() == {"restored_items": 2, "restored_history": 3}
+    assert r.json() == {"restored_items": 2, "restored_history": 3, "restored_sales": 0}
     assert client.get("/api/items/333").json()["name"] == "អង្ករ Rice"
     assert client.get("/api/settings/rate").json()["khr_per_usd"] == 4050
     assert len(client.get("/api/items/8851234567890/history").json()) == 2
@@ -245,3 +245,73 @@ def test_app_starts_and_reports_when_database_is_down(tmp_path, monkeypatch):
     monkeypatch.setenv("GROCERY_DB", str(tmp_path / "back.db"))
     assert c.get("/api/items").status_code == 200
     assert c.get("/healthz").json()["ok"] is True
+
+
+
+# ---------------- sales / basket ----------------
+def stock_shop(client):
+    client.put("/api/items/111", json=item(barcode="111", name="Coke", price=0.75,
+                                          currency="USD", cost=0.5, stock=10))
+    client.put("/api/items/222", json=item(barcode="222", name="Noodles", price=1000,
+                                          currency="KHR", cost=700, stock=5))
+
+
+def test_sale_totals_mixed_currencies_and_change(client):
+    stock_shop(client)
+    r = client.post("/api/sales", json={"items": [{"barcode": "111", "qty": 2},
+                                                  {"barcode": "222", "qty": 3}],
+                                        "paid_usd": 5, "paid_khr": 0})
+    assert r.status_code == 201
+    s = r.json()
+    # 2 x $0.75 = 6,150 ៛ ; 3 x 1,000 ៛ = 3,000 ៛ ; total 9,150 -> 9,200 ៛
+    assert s["total_khr"] == 9200 and s["total_usd"] == round(9150 / 4100, 2)
+    assert s["items_count"] == 5
+    # paid $5 = 20,500 ៛ ; change 11,350 -> 11,400 ៛ = $2 + 3,200 ៛
+    assert s["change_khr"] == 11400
+    assert (s["change_usd_part"], s["change_khr_part"]) == (2, 3200)
+    # profit: (9,150 - (2x0.5x4100 + 3x700)) / 4100 = 2,950 / 4100
+    assert s["profit_usd"] == round(2950 / 4100, 2)
+    assert [(l["name"], l["qty"]) for l in s["lines"]] == [("Coke", 2), ("Noodles", 3)]
+
+
+def test_sale_updates_stock_and_cancel_restores_it(client):
+    stock_shop(client)
+    sid = client.post("/api/sales", json={"items": [{"barcode": "222", "qty": 4},
+                                                    {"barcode": "222", "qty": 3}]}).json()["id"]
+    assert client.get("/api/items/222").json()["stock"] == 0        # 5 - 7, floored at 0
+    assert client.delete(f"/api/sales/{sid}").status_code == 204
+    assert client.get("/api/items/222").json()["stock"] == 7
+    assert client.get("/api/sales").json()["sales"] == 0
+
+
+def test_sale_rejects_unknown_item_and_underpayment(client):
+    stock_shop(client)
+    r = client.post("/api/sales", json={"items": [{"barcode": "999", "qty": 1}]})
+    assert r.status_code == 400 and "999" in r.json()["detail"]
+    r = client.post("/api/sales", json={"items": [{"barcode": "111", "qty": 1}], "paid_khr": 1000})
+    assert r.status_code == 400
+    assert client.post("/api/sales", json={"items": []}).status_code == 422
+    assert client.get("/api/sales").json()["sales"] == 0           # nothing half-saved
+
+
+def test_day_summary(client):
+    stock_shop(client)
+    client.post("/api/sales", json={"items": [{"barcode": "111", "qty": 1}]})
+    client.post("/api/sales", json={"items": [{"barcode": "222", "qty": 2}]})
+    d = client.get("/api/sales").json()
+    assert d["sales"] == 2 and d["items"] == 3
+    assert d["total_khr"] == 5100                                   # 3,075 + 2,000 -> 5,100
+    assert d["list"][0]["lines"][0]["name"] == "Noodles"            # newest first
+    assert client.get("/api/sales", params={"day": "2000-01-01"}).json()["sales"] == 0
+
+
+def test_sales_survive_backup_and_restore(client):
+    stock_shop(client)
+    client.post("/api/sales", json={"items": [{"barcode": "111", "qty": 2}]})
+    snap = client.get("/api/backup").json()
+    assert len(snap["sales"]) == 1 and len(snap["sale_items"]) == 1
+    client.delete(f"/api/sales/{snap['sales'][0]['id']}")
+    r = client.post("/api/restore?confirm=true", json=snap).json()
+    assert r["restored_sales"] == 1
+    d = client.get("/api/sales", params={"day": snap["sales"][0]["day"]}).json()
+    assert d["sales"] == 1 and d["list"][0]["lines"][0]["qty"] == 2

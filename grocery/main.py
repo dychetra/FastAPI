@@ -20,7 +20,7 @@ import csv
 import io
 import os
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 import httpx
@@ -146,7 +146,7 @@ def to_out(row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -388,6 +388,14 @@ class Backup(BaseModel):
     items: list[ItemIn]
     history: list[HistoryRow]
     updated_at: dict[str, str] = {}
+    # added in v1.6; older backup files have none and keep existing sales on restore
+    sales: Optional[list[dict]] = None
+    sale_items: Optional[list[dict]] = None
+
+
+SALE_COLS = ["id", "created_at", "day", "rate", "items_count", "total_khr", "total_usd",
+             "cost_khr", "paid_usd", "paid_khr", "change_khr"]
+SALE_ITEM_COLS = ["sale_id", "barcode", "name", "qty", "price", "currency", "line_khr", "cost"]
 
 
 @app.get("/api/backup", response_model=Backup)
@@ -404,6 +412,10 @@ def backup():
             items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields}) for r in items],
             history=[HistoryRow(**dict(r)) for r in hist],
             updated_at={r["barcode"]: r["updated_at"] for r in items},
+            sales=[{k: r[k] for k in SALE_COLS}
+                   for r in conn.execute("SELECT * FROM sales ORDER BY id").fetchall()],
+            sale_items=[{k: r[k] for k in SALE_ITEM_COLS}
+                        for r in conn.execute("SELECT * FROM sale_items ORDER BY id").fetchall()],
         )
 
 
@@ -433,7 +445,24 @@ def restore(data: Backup, confirm: bool = False):
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(data.khr_per_usd),),
         )
-    return {"restored_items": len(data.items), "restored_history": len(data.history)}
+        if data.sales is not None:
+            conn.execute("DELETE FROM sale_items")
+            conn.execute("DELETE FROM sales")
+            new_id = {}
+            for r in data.sales:  # let the database number them; keep the links
+                vals = [r.get(k) for k in SALE_COLS[1:]]
+                new_id[r["id"]] = conn.execute(
+                    f"INSERT INTO sales({','.join(SALE_COLS[1:])}) VALUES "
+                    f"({','.join('?' * (len(SALE_COLS) - 1))}) RETURNING id", vals
+                ).fetchone()["id"]
+            for r in data.sale_items or []:
+                if r.get("sale_id") in new_id:
+                    vals = [new_id[r["sale_id"]]] + [r.get(k) for k in SALE_ITEM_COLS[1:]]
+                    conn.execute(
+                        f"INSERT INTO sale_items({','.join(SALE_ITEM_COLS)}) VALUES "
+                        f"({','.join('?' * len(SALE_ITEM_COLS))})", vals)
+    return {"restored_items": len(data.items), "restored_history": len(data.history),
+            "restored_sales": len(data.sales or [])}
 
 
 # --------------------------------------------------------------------------
@@ -577,3 +606,173 @@ async def lookup_online(barcode: str):
             _lookup_cache.clear()
         _lookup_cache[barcode] = out
     return LookupOut(**out, similar=similar)
+
+
+# --------------------------------------------------------------------------
+# Sales / basket
+# --------------------------------------------------------------------------
+# Money rule (same in the browser): every line is converted to riel at the
+# shop rate, the basket total is rounded to the nearest 100 ៛ once, and the
+# dollar total is the exact riel total / rate. Change is given in riel, or as
+# whole dollars + riel.
+CAMBODIA = timezone(timedelta(hours=7))  # Cambodia has no daylight saving
+
+
+def local_day(ts: Optional[datetime] = None) -> str:
+    return (ts or datetime.now(timezone.utc)).astimezone(CAMBODIA).date().isoformat()
+
+
+def khr_exact(price: float, currency: str, rate: float) -> float:
+    return price * rate if currency == "USD" else price
+
+
+class SaleLineIn(BaseModel):
+    barcode: str = Field(min_length=1, max_length=64)
+    qty: int = Field(ge=1, le=9999)
+
+
+class SaleIn(BaseModel):
+    items: list[SaleLineIn] = Field(min_length=1, max_length=500)
+    paid_usd: float = Field(default=0, ge=0)
+    paid_khr: float = Field(default=0, ge=0)
+
+
+class SaleLineOut(BaseModel):
+    barcode: str
+    name: str
+    qty: int
+    price: float
+    currency: Currency
+    line_khr: int
+
+
+class SaleOut(BaseModel):
+    id: int
+    created_at: str
+    day: str
+    rate: float
+    items_count: int
+    total_khr: int
+    total_usd: float
+    profit_usd: Optional[float] = None
+    paid_usd: float
+    paid_khr: float
+    change_khr: int
+    change_usd_part: int = 0       # change as whole dollars ...
+    change_khr_part: int = 0       # ... plus riel
+    lines: list[SaleLineOut] = []
+
+
+class DaySummary(BaseModel):
+    day: str
+    sales: int
+    items: int
+    total_usd: float
+    total_khr: int
+    profit_usd: Optional[float]     # only from items that have a cost price
+    list: list[SaleOut]
+
+
+def change_split(change_khr: float, rate: float) -> tuple[int, int]:
+    dollars = int(change_khr // rate) if change_khr > 0 else 0
+    return dollars, round_khr(change_khr - dollars * rate)
+
+
+def sale_out(row, lines=None) -> SaleOut:
+    dollars, riel = change_split(row["change_khr"], row["rate"])
+    profit = None
+    if row["cost_khr"] is not None:
+        profit = round((row["total_khr"] - row["cost_khr"]) / row["rate"], 2)
+    return SaleOut(
+        id=row["id"], created_at=row["created_at"], day=row["day"], rate=row["rate"],
+        items_count=row["items_count"], total_khr=round_khr(row["total_khr"]),
+        total_usd=row["total_usd"], profit_usd=profit, paid_usd=row["paid_usd"],
+        paid_khr=row["paid_khr"], change_khr=round_khr(row["change_khr"]),
+        change_usd_part=dollars, change_khr_part=riel,
+        lines=[SaleLineOut(barcode=l["barcode"], name=l["name"], qty=l["qty"],
+                           price=l["price"], currency=l["currency"],
+                           line_khr=round_khr(l["line_khr"])) for l in (lines or [])],
+    )
+
+
+@app.post("/api/sales", response_model=SaleOut, status_code=201)
+def create_sale(sale: SaleIn):
+    """Record a finished sale. Prices come from the database, not the phone."""
+    qty_by_code: dict[str, int] = {}
+    for line in sale.items:  # same barcode twice -> add up
+        code = line.barcode.strip()
+        qty_by_code[code] = qty_by_code.get(code, 0) + line.qty
+    ts = datetime.now(timezone.utc)
+    with db() as conn:
+        rate = get_rate(conn)
+        lines, total, cost_total, cost_known = [], 0.0, 0.0, True
+        for code, qty in qty_by_code.items():
+            it = conn.execute("SELECT * FROM items WHERE barcode=?", (code,)).fetchone()
+            if it is None:
+                raise HTTPException(400, f"Unknown barcode {code}: add the item first")
+            line_khr = khr_exact(it["price"], it["currency"], rate) * qty
+            total += line_khr
+            if it["cost"] is None:
+                cost_known = False
+            else:
+                cost_total += khr_exact(it["cost"], it["currency"], rate) * qty
+            lines.append((it, qty, line_khr))
+        paid = sale.paid_usd * rate + sale.paid_khr
+        if paid and paid + 1e-6 < round_khr(total):
+            raise HTTPException(400, "Customer paid less than the total")
+        change = max(0.0, paid - total) if paid else 0.0
+        sale_id = conn.execute(
+            "INSERT INTO sales(created_at,day,rate,items_count,total_khr,total_usd,cost_khr,"
+            "paid_usd,paid_khr,change_khr) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id",
+            (ts.isoformat(timespec="seconds"), local_day(ts), rate,
+             sum(qty_by_code.values()), total, round(total / rate, 2),
+             cost_total if cost_known else None, sale.paid_usd, sale.paid_khr, change),
+        ).fetchone()["id"]
+        for it, qty, line_khr in lines:
+            conn.execute(
+                "INSERT INTO sale_items(sale_id,barcode,name,qty,price,currency,line_khr,cost)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (sale_id, it["barcode"], it["name"], qty, it["price"], it["currency"],
+                 line_khr, it["cost"]),
+            )
+            if it["stock"] is not None:  # count down stock, never below zero
+                conn.execute("UPDATE items SET stock=? WHERE barcode=?",
+                             (max(0, it["stock"] - qty), it["barcode"]))
+        row = conn.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
+        sl = conn.execute("SELECT * FROM sale_items WHERE sale_id=? ORDER BY id", (sale_id,)).fetchall()
+        return sale_out(row, sl)
+
+
+@app.get("/api/sales", response_model=DaySummary)
+def list_sales(day: str = Query(default="", pattern=r"^(\d{4}-\d{2}-\d{2})?$")):
+    """Sales of one day (Cambodia time), newest first, with totals."""
+    day = day or local_day()
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM sales WHERE day=? ORDER BY id DESC", (day,)).fetchall()
+        out = []
+        for r in rows:
+            sl = conn.execute("SELECT * FROM sale_items WHERE sale_id=? ORDER BY id",
+                              (r["id"],)).fetchall()
+            out.append(sale_out(r, sl))
+    profits = [s.profit_usd for s in out]
+    return DaySummary(
+        day=day, sales=len(out), items=sum(s.items_count for s in out),
+        total_usd=round(sum(r["total_khr"] / r["rate"] for r in rows), 2),
+        total_khr=round_khr(sum(r["total_khr"] for r in rows)),
+        profit_usd=round(sum(profits), 2) if out and all(p is not None for p in profits) else None,
+        list=out,
+    )
+
+
+@app.delete("/api/sales/{sale_id}", status_code=204)
+def cancel_sale(sale_id: int):
+    """Cancel a mistaken sale and put the items back in stock."""
+    with db() as conn:
+        if not conn.execute("SELECT id FROM sales WHERE id=?", (sale_id,)).fetchone():
+            raise HTTPException(404, "Sale not found")
+        for l in conn.execute("SELECT barcode,qty FROM sale_items WHERE sale_id=?",
+                              (sale_id,)).fetchall():
+            conn.execute("UPDATE items SET stock=stock+? WHERE barcode=? AND stock IS NOT NULL",
+                         (l["qty"], l["barcode"]))
+        conn.execute("DELETE FROM sale_items WHERE sale_id=?", (sale_id,))
+        conn.execute("DELETE FROM sales WHERE id=?", (sale_id,))
