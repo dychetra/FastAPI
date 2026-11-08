@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grocery Price Tracker · តម្លៃទំនិញ</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1d2330; --muted:#6b7280; --line:#e5e7eb;
+          --accent:#0f766e; --accent-ink:#fff; --warn:#b45309; --bad:#b91c1c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,"Segoe UI","Noto Sans Khmer",sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { background:var(--accent); color:var(--accent-ink); padding:12px 16px; }
+  header h1 { margin:0; font-size:18px; }
+  header small { opacity:.85; }
+  nav { display:flex; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  nav button { flex:1; padding:12px 4px; border:0; background:none; font:inherit; font-size:15px;
+               color:var(--muted); border-bottom:3px solid transparent; cursor:pointer; }
+  nav button.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
+  main { max-width:720px; margin:0 auto; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:11px 12px; font:inherit; font-size:16px; border:1px solid var(--line);
+                  border-radius:8px; background:#fff; }
+  input:focus { outline:2px solid var(--accent); border-color:transparent; }
+  button.btn { padding:11px 14px; font:inherit; font-size:15px; border-radius:8px; border:1px solid var(--line);
+               background:#fff; cursor:pointer; }
+  button.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  button.danger { color:var(--bad); }
+  .hidden { display:none !important; }
+  #reader { width:100%; margin-top:12px; border-radius:8px; overflow:hidden; }
+  .price-big { font-size:40px; font-weight:700; line-height:1.1; }
+  .price-alt { font-size:22px; color:var(--muted); }
+  .item-name { font-size:20px; font-weight:600; margin-bottom:6px; }
+  .meta { font-size:13px; color:var(--muted); }
+  .msg { padding:10px 12px; border-radius:8px; margin-top:10px; font-size:14px; }
+  .msg.ok { background:#ecfdf5; color:#065f46; }
+  .msg.warn { background:#fffbeb; color:var(--warn); }
+  .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { flex:1; padding:11px; border:0; background:#fff; font:inherit; cursor:pointer; }
+  .seg button.on { background:var(--accent); color:#fff; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:9px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  td.num, th.num { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  tr.click { cursor:pointer; }
+  tr.click:hover { background:#f9fafb; }
+  .history li { font-size:14px; margin:3px 0; }
+  .stat { font-size:24px; font-weight:700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛒 Grocery Price Tracker · តម្លៃទំនិញ</h1>
+  <small id="rateLabel">1 USD = … KHR</small>
+</header>
+<nav>
+  <button data-tab="scan" class="on">📷 Scan · ស្កេន</button>
+  <button data-tab="items">📦 Items · ទំនិញ</button>
+  <button data-tab="settings">⚙️ Settings · ការកំណត់</button>
+</nav>
+
+<main>
+  <div id="flash" class="msg ok hidden" style="margin:0 0 12px"></div>
+  <!-- ============ SCAN ============ -->
+  <section id="tab-scan">
+    <div class="card">
+      <label for="code">Barcode · លេខបាកូដ (type, or use a USB scanner, then Enter)</label>
+      <div class="row">
+        <input id="code" inputmode="numeric" autocomplete="off" autofocus placeholder="e.g. 8851234567890">
+        <button class="btn primary" style="flex:0 0 auto" id="lookupBtn">Check · ពិនិត្យ</button>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="camBtn">📷 Use camera · ប្រើកាមេរ៉ា</button>
+      </div>
+      <div id="reader" class="hidden"></div>
+      <div id="camMsg" class="msg warn hidden"></div>
+    </div>
+
+    <div id="result" class="card hidden">
+      <div class="item-name" id="rName"></div>
+      <div class="price-big" id="rMain"></div>
+      <div class="price-alt" id="rAlt"></div>
+      <div class="meta" id="rMeta" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" id="editBtn">✏️ Edit price · កែតម្លៃ</button>
+        <button class="btn" id="histBtn">🕘 History · ប្រវត្តិ</button>
+      </div>
+      <ul class="history hidden" id="history"></ul>
+    </div>
+
+    <!-- add / edit form -->
+    <form id="form" class="card hidden" autocomplete="off">
+      <div id="formTitle" class="item-name"></div>
+      <label>Barcode · លេខបាកូដ</label>
+      <input id="fBarcode" required>
+      <label>Name · ឈ្មោះ</label>
+      <input id="fName" required maxlength="200">
+      <label>Category · ប្រភេទ</label>
+      <input id="fCategory" list="cats" maxlength="100" placeholder="Drinks, Rice, Snacks…">
+      <datalist id="cats"></datalist>
+      <label>Currency · រូបិយប័ណ្ណ</label>
+      <div class="seg" id="fCurrency">
+        <button type="button" data-cur="USD" class="on">$ USD</button>
+        <button type="button" data-cur="KHR">៛ KHR</button>
+      </div>
+      <div class="row">
+        <div>
+          <label>Selling price · តម្លៃលក់</label>
+          <input id="fPrice" type="number" step="any" min="0" required>
+        </div>
+        <div>
+          <label>Cost (optional) · ថ្លៃដើម</label>
+          <input id="fCost" type="number" step="any" min="0">
+        </div>
+      </div>
+      <div class="meta" id="fPreview" style="margin-top:6px"></div>
+      <label>Stock qty (optional) · ចំនួនស្តុក</label>
+      <input id="fStock" type="number" step="1" min="0">
+      <div class="row" style="margin-top:16px">
+        <button type="submit" class="btn primary">💾 Save · រក្សាទុក</button>
+        <button type="button" class="btn" id="cancelBtn">Cancel · បោះបង់</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button type="button" class="btn danger hidden" id="deleteBtn">🗑 Delete item · លុប</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- ============ ITEMS ============ -->
+  <section id="tab-items" class="hidden">
+    <div class="card">
+      <div class="row">
+        <input id="search" placeholder="Search name / barcode · ស្វែងរក">
+        <select id="catFilter" style="flex:0 0 40%"><option value="">All categories</option></select>
+      </div>
+    </div>
+    <div class="card" style="padding:8px">
+      <table>
+        <thead><tr><th>Item</th><th class="num">USD</th><th class="num">KHR</th></tr></thead>
+        <tbody id="list"></tbody>
+      </table>
+      <div class="meta" id="listInfo" style="padding:8px"></div>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section id="tab-settings" class="hidden">
+    <div class="card">
+      <label>Exchange rate · អត្រាប្តូរប្រាក់ (KHR per 1 USD)</label>
+      <div class="row">
+        <input id="rate" type="number" step="1" min="1">
+        <button class="btn primary" style="flex:0 0 auto" id="rateSave">Save · រក្សាទុក</button>
+      </div>
+      <div class="meta" style="margin-top:6px">Riel prices are rounded to the nearest 100 ៛.</div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <div><div class="meta">Items saved</div><div class="stat" id="sItems">–</div></div>
+        <div><div class="meta">Stock value (at cost, USD)</div><div class="stat" id="sValue">–</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <a href="/api/export.csv"><button class="btn">⬇️ Download all prices (CSV / Excel)</button></a>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.status === 204 ? true : r.json();
+};
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+const usd = n => "$" + Number(n).toFixed(2);
+const khr = n => Number(n).toLocaleString("en-US") + " ៛";
+let RATE = 4100, current = null, currency = "USD";
+
+// ---------- tabs ----------
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  ["scan", "items", "settings"].forEach(t => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
+  if (b.dataset.tab === "items") loadList();
+  if (b.dataset.tab === "settings") loadSummary();
+  if (b.dataset.tab !== "scan") stopCamera();
+});
+
+// ---------- rate ----------
+async function loadRate() {
+  RATE = (await api("/api/settings/rate")).khr_per_usd;
+  $("#rateLabel").textContent = `1 USD = ${RATE.toLocaleString()} KHR`;
+  $("#rate").value = RATE;
+}
+$("#rateSave").onclick = async () => {
+  const v = parseFloat($("#rate").value);
+  if (!(v > 0)) return alert("Enter a valid rate");
+  await api("/api/settings/rate", { method: "PUT", body: JSON.stringify({ khr_per_usd: v }) });
+  await loadRate(); flash("Exchange rate saved ✔");
+};
+
+// ---------- lookup ----------
+async function lookup(code) {
+  code = (code || "").trim();
+  if (!code) return;
+  $("#code").value = code;
+  hide("#form"); hide("#history");
+  const item = await api("/api/items/" + encodeURIComponent(code));
+  if (item) showItem(item);
+  else { hide("#result"); openForm({ barcode: code }, true); }
+}
+function showItem(it) {
+  current = it;
+  $("#rName").textContent = it.name;
+  const main = it.currency === "USD" ? usd(it.price_usd) : khr(it.price_khr);
+  const alt = it.currency === "USD" ? "≈ " + khr(it.price_khr) : "≈ " + usd(it.price_usd);
+  $("#rMain").textContent = main;
+  $("#rAlt").textContent = alt;
+  const bits = [`Barcode ${esc(it.barcode)}`];
+  if (it.category) bits.push(esc(it.category));
+  if (it.margin_pct !== null) bits.push(`Margin ${it.margin_pct}%`);
+  if (it.stock !== null) bits.push(`Stock ${it.stock}`);
+  bits.push("Updated " + new Date(it.updated_at).toLocaleDateString());
+  $("#rMeta").innerHTML = bits.join(" · ");
+  show("#result");
+}
+$("#lookupBtn").onclick = () => lookup($("#code").value);
+$("#code").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); lookup(e.target.value); } });
+$("#editBtn").onclick = () => openForm(current, false);
+$("#histBtn").onclick = async () => {
+  const h = await api(`/api/items/${encodeURIComponent(current.barcode)}/history`);
+  $("#history").innerHTML = h.map(x =>
+    `<li>${new Date(x.changed_at).toLocaleString()} — <b>${x.currency === "USD" ? usd(x.price) : khr(x.price)}</b></li>`).join("");
+  $("#history").classList.toggle("hidden");
+};
+
+// ---------- form ----------
+function setCurrency(c) {
+  currency = c;
+  document.querySelectorAll("#fCurrency button").forEach(b => b.classList.toggle("on", b.dataset.cur === c));
+  $("#fPrice").step = $("#fCost").step = c === "USD" ? "0.01" : "100";
+  preview();
+}
+document.querySelectorAll("#fCurrency button").forEach(b => b.onclick = () => setCurrency(b.dataset.cur));
+function preview() {
+  const p = parseFloat($("#fPrice").value);
+  if (!(p > 0)) return $("#fPreview").textContent = "";
+  $("#fPreview").textContent = currency === "USD"
+    ? `= ${khr(Math.round(p * RATE / 100) * 100)}` : `= ${usd(p / RATE)}`;
+}
+$("#fPrice").oninput = preview;
+async function openForm(it, isNew) {
+  $("#formTitle").textContent = isNew ? "New item · ទំនិញថ្មី" : "Edit item · កែប្រែ";
+  $("#fBarcode").value = it.barcode || "";
+  $("#fBarcode").readOnly = !isNew;
+  $("#fName").value = it.name || "";
+  $("#fCategory").value = it.category || "";
+  $("#fPrice").value = it.price ?? "";
+  $("#fCost").value = it.cost ?? "";
+  $("#fStock").value = it.stock ?? "";
+  setCurrency(it.currency || "USD");
+  $("#deleteBtn").classList.toggle("hidden", isNew);
+  if (isNew) flash("Not found — add it now · រកមិនឃើញ សូមបញ្ចូលថ្មី", "warn");
+  const s = await api("/api/summary");
+  $("#cats").innerHTML = s.categories.map(c => `<option value="${esc(c)}">`).join("");
+  show("#form");
+  (isNew ? $("#fName") : $("#fPrice")).focus();
+}
+const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+$("#form").onsubmit = async e => {
+  e.preventDefault();
+  const body = {
+    barcode: $("#fBarcode").value.trim(), name: $("#fName").value.trim(),
+    category: $("#fCategory").value.trim(), price: num("#fPrice"), currency,
+    cost: num("#fCost"), stock: num("#fStock"),
+  };
+  try {
+    const it = await api("/api/items/" + encodeURIComponent(body.barcode), { method: "PUT", body: JSON.stringify(body) });
+    hide("#form"); showItem(it); flash("Saved ✔ · បានរក្សាទុក");
+    $("#code").value = ""; $("#code").focus();
+  } catch (err) { alert("Could not save: " + err.message); }
+};
+$("#cancelBtn").onclick = () => { hide("#form"); $("#code").focus(); };
+$("#deleteBtn").onclick = async () => {
+  if (!confirm(`Delete "${current.name}"?`)) return;
+  await api("/api/items/" + encodeURIComponent(current.barcode), { method: "DELETE" });
+  hide("#form"); hide("#result"); flash("Deleted");
+};
+
+// ---------- camera ----------
+let scanner = null;
+$("#camBtn").onclick = async () => {
+  if (scanner) return stopCamera();
+  if (!window.Html5Qrcode) return camMsg("Camera library not loaded (needs internet). Type the barcode or use a USB scanner.");
+  if (!window.isSecureContext) return camMsg("The camera only works over HTTPS or on localhost. See README → 'Using a phone'.");
+  show("#reader"); hide("#camMsg");
+  const F = Html5QrcodeSupportedFormats;
+  scanner = new Html5Qrcode("reader", { formatsToSupport:
+    [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE], verbose: false });
+  $("#camBtn").textContent = "⏹ Stop camera";
+  try {
+    await scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 280, height: 140 } },
+      code => { if (navigator.vibrate) navigator.vibrate(80); stopCamera(); lookup(code); });
+  } catch (err) { stopCamera(); camMsg("Could not open camera: " + err); }
+};
+async function stopCamera() {
+  if (!scanner) return;
+  try { await scanner.stop(); } catch {}
+  scanner = null; hide("#reader"); $("#camBtn").textContent = "📷 Use camera · ប្រើកាមេរ៉ា";
+}
+function camMsg(t) { $("#camMsg").textContent = t; show("#camMsg"); }
+
+// ---------- list ----------
+let timer;
+$("#search").oninput = () => { clearTimeout(timer); timer = setTimeout(loadList, 200); };
+$("#catFilter").onchange = loadList;
+async function loadList() {
+  const q = new URLSearchParams({ q: $("#search").value, category: $("#catFilter").value });
+  const [items, s] = await Promise.all([api("/api/items?" + q), api("/api/summary")]);
+  const sel = $("#catFilter").value;
+  $("#catFilter").innerHTML = `<option value="">All categories</option>` +
+    s.categories.map(c => `<option ${c === sel ? "selected" : ""}>${esc(c)}</option>`).join("");
+  $("#list").innerHTML = items.map(i => `
+    <tr class="click" data-code="${esc(i.barcode)}">
+      <td><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(i.category) : ""}</div></td>
+      <td class="num">${usd(i.price_usd)}</td><td class="num">${khr(i.price_khr)}</td>
+    </tr>`).join("");
+  $("#listInfo").textContent = `${items.length} item(s)`;
+  document.querySelectorAll("#list tr").forEach(tr => tr.onclick = () => {
+    document.querySelector('nav button[data-tab="scan"]').click(); lookup(tr.dataset.code);
+  });
+}
+async function loadSummary() {
+  const s = await api("/api/summary");
+  $("#sItems").textContent = s.items;
+  $("#sValue").textContent = usd(s.stock_value_usd);
+}
+
+// ---------- utils ----------
+function show(s) { $(s).classList.remove("hidden"); }
+function hide(s) { $(s).classList.add("hidden"); }
+function flash(t, kind = "ok") {
+  const f = $("#flash"); f.textContent = t; f.className = "msg " + kind;
+  clearTimeout(flash.t); flash.t = setTimeout(() => f.classList.add("hidden"), 3500);
+}
+loadRate();
+</script>
+</body>
+</html>
