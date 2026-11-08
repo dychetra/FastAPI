@@ -91,7 +91,7 @@ def test_validation(client):
 
 
 def test_homepage(client):
-    assert "Grocery Price Tracker" in client.get("/").text
+    assert "ScanPrice" in client.get("/").text
 
 
 def test_search_is_case_insensitive(client):
@@ -128,3 +128,6 @@ def test_password_required_when_set(tmp_path, monkeypatch, backend):
     assert c.get("/api/items", auth=("shop", "wrong")).status_code == 401
     assert c.get("/api/items", auth=("anyone", "s3cret")).status_code == 200
     assert c.get("/healthz").json()["database"] == backend  # open for health checks
+    assert c.get("/static/manifest.webmanifest").json()["short_name"] == "ScanPrice"
+    assert c.get("/static/apple-touch-icon.png").status_code == 200
+    assert c.get("/static/index.html").status_code == 401  # the app itself stays locked

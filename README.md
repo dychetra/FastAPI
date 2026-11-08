@@ -1,6 +1,6 @@
-# Grocery Price Tracker · តម្លៃទំនិញ
+# ScanPrice · ស្កេនតម្លៃ
 
-A simple app for a family grocery shop. Scan a barcode to check the price; if
+**ScanPrice** is a simple app for a family grocery shop. Scan a barcode to check the price; if
 the item is new, type its name and price once and it is saved.
 
 - Scan with a **USB/Bluetooth barcode scanner**, the **phone camera**, or type the number

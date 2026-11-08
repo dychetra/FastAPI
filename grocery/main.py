@@ -1,4 +1,4 @@
-"""Grocery barcode price tracker.
+"""ScanPrice · ស្កេនតម្លៃ — grocery barcode price tracker.
 
 A small FastAPI app for a family grocery shop:
   * scan a barcode (phone camera or USB scanner) to look up an item's price
@@ -141,10 +141,19 @@ def to_out(row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-app = FastAPI(title="Grocery Price Tracker", version="1.1.0")
+app = FastAPI(title="ScanPrice", version="1.2.0")
 init_db()
 
-PUBLIC_PATHS = {"/healthz"}
+# Open without login: health check, plus the app name/icons so phones can show
+# them on the home screen (they fetch these without the password).
+PUBLIC_PATHS = {
+    "/healthz",
+    "/static/manifest.webmanifest",
+    "/static/icon.svg",
+    "/static/icon-192.png",
+    "/static/icon-512.png",
+    "/static/apple-touch-icon.png",
+}
 
 
 @app.middleware("http")
@@ -165,7 +174,7 @@ async def require_password(request: Request, call_next):
                 ok = False
         if not ok:
             return Response("Login required", status_code=401,
-                            headers={"WWW-Authenticate": 'Basic realm="Grocery shop"'})
+                            headers={"WWW-Authenticate": 'Basic realm="ScanPrice"'})
     return await call_next(request)
 
 

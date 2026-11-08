@@ -1,0 +1,13 @@
+{
+  "name": "ScanPrice · ស្កេនតម្លៃ",
+  "short_name": "ScanPrice",
+  "description": "Scan barcodes to check and save grocery prices in USD and KHR",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#0f766e",
+  "icons": [
+    {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"}
+  ]
+}
