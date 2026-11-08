@@ -189,6 +189,15 @@
       <div class="meta" style="margin-top:6px">Riel prices are rounded to the nearest 100 ៛.</div>
     </div>
     <div class="card">
+      <label style="display:flex;align-items:center;gap:10px;margin:0;color:var(--ink);font-size:16px">
+        <input type="checkbox" id="soundOn" style="width:22px;height:22px"> 🔊 Beep when scanning · សំឡេងពេលស្កេន
+      </label>
+      <div class="row" style="margin-top:10px">
+        <button class="btn" id="testBeep">▶ Test sound · សាកល្បង</button>
+      </div>
+      <div class="meta" style="margin-top:6px">One high beep = price found. Two low beeps = new item. iPhone: turn off silent mode to hear it.</div>
+    </div>
+    <div class="card">
       <div class="row">
         <div><div class="meta">Items saved</div><div class="stat" id="sItems">–</div></div>
         <div><div class="meta">Stock value (at cost, USD)</div><div class="stat" id="sValue">–</div></div>
@@ -246,6 +255,7 @@ async function lookup(code) {
   $("#code").value = code;
   hide("#form"); hide("#history");
   const item = await api("/api/items/" + encodeURIComponent(code));
+  beep(item ? "found" : "new");
   if (item) showItem(item);
   else { hide("#result"); openForm({ barcode: code }, true); }
 }
@@ -362,6 +372,39 @@ $("#deleteBtn").onclick = async () => {
   hide("#form"); hide("#result"); flash("Deleted");
 };
 
+// ---------- sound ----------
+// Scanner-style beeps made with the Web Audio API (no sound files needed).
+// Phones only allow sound after a tap, so audio is "unlocked" on the first tap.
+let audioCtx = null;
+const soundOn = () => localStorage.getItem("scanprice.sound") !== "off";
+function unlockAudio() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch {}
+}
+document.addEventListener("pointerdown", unlockAudio, { capture: true });
+document.addEventListener("keydown", unlockAudio, { capture: true });
+function tone(freq, start, dur, vol = 0.25) {
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + start;
+  o.type = "square"; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function beep(kind = "found") {
+  if (navigator.vibrate) navigator.vibrate(kind === "found" ? 80 : [60, 60, 60]);
+  if (!soundOn()) return;
+  unlockAudio(); if (!audioCtx) return;
+  if (kind === "found") tone(2400, 0, 0.12);                 // classic till "beep"
+  else { tone(900, 0, 0.11); tone(700, 0.16, 0.14); }        // new item: two low beeps
+}
+$("#soundOn").checked = soundOn();
+$("#soundOn").onchange = e => localStorage.setItem("scanprice.sound", e.target.checked ? "on" : "off");
+$("#testBeep").onclick = () => { const was = soundOn(); localStorage.setItem("scanprice.sound", "on");
+  beep("found"); setTimeout(() => beep("new"), 500); if (!was) localStorage.setItem("scanprice.sound", "off"); };
+
 // ---------- camera ----------
 // Barcode reading uses the standard BarcodeDetector: the phone's own when it has
 // one that reads EAN (most Android phones), otherwise ZXing compiled to
@@ -443,7 +486,6 @@ $("#camBtn").onclick = async () => {
         let code = await detectIn(work, det);
         if (!code) code = await detectIn(video, det);   // whole frame as a second chance
         if (code && stream) {
-          if (navigator.vibrate) navigator.vibrate(80);
           stopCamera(); lookup(code); return;
         }
       } catch {}
@@ -481,7 +523,7 @@ $("#photoInput").onchange = async e => {
     const found = await det.detect(work);
     const code = found.map(f => String(f.rawValue).trim()).find(c => checkDigitOk(c) !== false);
     if (!code) throw new Error("none");
-    hide("#camMsg"); if (navigator.vibrate) navigator.vibrate(80);
+    hide("#camMsg");
     lookup(code);
   } catch {
     camMsg("No barcode found in the photo. Take it closer so the barcode fills most of the photo, sharp and straight — or type the number. · រកមិនឃើញបាកូដ");
