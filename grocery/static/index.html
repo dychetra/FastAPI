@@ -260,7 +260,7 @@
       <div class="row" style="margin-top:10px">
         <button class="btn" id="testBeep">▶ Test sound · សាកល្បង</button>
       </div>
-      <div class="meta" style="margin-top:6px">One high beep = price found. Two low beeps = new item. iPhone: turn off silent mode to hear it.</div>
+      <div class="meta" style="margin-top:6px">One high beep = price found. Two low beeps = new item. iPhone: turn the volume up with the side buttons, then tap ▶ Test sound.</div>
     </div>
     <div class="card">
       <div class="row">
@@ -439,32 +439,74 @@ $("#deleteBtn").onclick = async () => {
 };
 
 // ---------- sound ----------
-// Scanner-style beeps made with the Web Audio API (no sound files needed).
-// Phones only allow sound after a tap, so audio is "unlocked" on the first tap.
-let audioCtx = null;
+// Scanner beeps. iPhones are strict about web sound:
+//  * Web Audio is muted by the silent switch and needs unlocking by a tap that
+//    *ends* (touchend/click), so the main player is an <audio> element with a
+//    beep WAV generated here (no sound files to download);
+//  * an <audio> element may play by itself later only after it once played
+//    during a tap, so the first tap plays a silent clip on it ("unlock").
+// Web Audio stays as a backup for browsers where <audio> fails.
 const soundOn = () => localStorage.getItem("scanprice.sound") !== "off";
+function makeWav(tones, seconds) {          // tones: [[freq, start, duration], ...]
+  const rate = 22050, n = Math.floor(rate * seconds), buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const t = i / rate; let x = 0;
+    for (const [f, st, d] of tones) if (t >= st && t < st + d) {
+      const env = Math.min(1, (t - st) / 0.005, (st + d - t) / 0.01);   // no clicks
+      x += (Math.sin(2 * Math.PI * f * t) >= 0 ? 1 : -1) * 0.35 * env;
+    }
+    v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, x)) * 32767, true);
+  }
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+}
+const SOUND_URL = {
+  silent: makeWav([], 0.05),
+  found: makeWav([[2400, 0, 0.12]], 0.15),                    // classic till "beep"
+  new: makeWav([[900, 0, 0.11], [700, 0.16, 0.14]], 0.32),    // two low beeps
+};
+const sfx = new Audio(); sfx.preload = "auto";
+let sfxUnlocked = false, sfxUnlocking = false, audioCtx = null;
 function unlockAudio() {
+  if (!sfxUnlocked && !sfxUnlocking) {   // one tap fires touchend + click: unlock once
+    sfxUnlocking = true;
+    sfx.src = SOUND_URL.silent;
+    const p = sfx.play();
+    const done = ok => { sfxUnlocked = ok; sfxUnlocking = false; };
+    if (p && p.then) p.then(() => done(true), () => done(false)); else done(true);
+  }
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === "suspended") audioCtx.resume();
+    if (audioCtx.state !== "running") audioCtx.resume();
   } catch {}
 }
-document.addEventListener("pointerdown", unlockAudio, { capture: true });
-document.addEventListener("keydown", unlockAudio, { capture: true });
-function tone(freq, start, dur, vol = 0.25) {
-  const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + start;
-  o.type = "square"; o.frequency.value = freq;
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
+["touchend", "click", "keydown"].forEach(ev =>
+  document.addEventListener(ev, unlockAudio, { capture: true, passive: true }));
+function webAudioBeep(kind) {
+  try {
+    if (!audioCtx) return;
+    if (audioCtx.state !== "running") audioCtx.resume();
+    const tone = (freq, start, dur) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime + start;
+      o.type = "square"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
+    };
+    if (kind === "found") tone(2400, 0, 0.12); else { tone(900, 0, 0.11); tone(700, 0.16, 0.14); }
+  } catch {}
 }
 function beep(kind = "found") {
-  if (navigator.vibrate) navigator.vibrate(kind === "found" ? 80 : [60, 60, 60]);
+  if (navigator.vibrate) navigator.vibrate(kind === "found" ? 80 : [60, 60, 60]);  // Android only
   if (!soundOn()) return;
-  unlockAudio(); if (!audioCtx) return;
-  if (kind === "found") tone(2400, 0, 0.12);                 // classic till "beep"
-  else { tone(900, 0, 0.11); tone(700, 0.16, 0.14); }        // new item: two low beeps
+  sfx.src = SOUND_URL[kind] || SOUND_URL.found;
+  sfx.currentTime = 0;
+  const p = sfx.play();
+  if (p && p.catch) p.catch(() => webAudioBeep(kind));
 }
 $("#soundOn").checked = soundOn();
 $("#soundOn").onchange = e => localStorage.setItem("scanprice.sound", e.target.checked ? "on" : "off");

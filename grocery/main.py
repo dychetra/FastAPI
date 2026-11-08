@@ -146,7 +146,7 @@ def to_out(row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
