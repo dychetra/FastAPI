@@ -7,27 +7,28 @@ A small FastAPI app for a family grocery shop:
   * keep a history of every price change, and export everything to CSV
 
 Run:  uvicorn main:app --reload      (from inside this folder)
-Data is stored in a single SQLite file (grocery.db by default).
+Data is stored in Neon/Postgres when DATABASE_URL is set, otherwise in a
+local SQLite file (grocery.db). Set APP_PASSWORD to require a login.
 """
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import os
-import sqlite3
-from contextlib import contextmanager
+import secrets
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterator, Literal, Optional
+from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("GROCERY_DB", BASE_DIR / "grocery.db"))
+import db as database
+from db import BASE_DIR
+
 DEFAULT_RATE = 4100.0  # KHR per 1 USD; change it in the app's settings
 
 Currency = Literal["USD", "KHR"]
@@ -36,49 +37,15 @@ Currency = Literal["USD", "KHR"]
 # --------------------------------------------------------------------------
 # Database
 # --------------------------------------------------------------------------
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS items (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    barcode     TEXT    NOT NULL UNIQUE,
-    name        TEXT    NOT NULL,
-    category    TEXT    NOT NULL DEFAULT '',
-    price       REAL    NOT NULL,
-    currency    TEXT    NOT NULL CHECK (currency IN ('USD','KHR')),
-    cost        REAL,
-    stock       INTEGER,
-    updated_at  TEXT    NOT NULL
-);
-CREATE TABLE IF NOT EXISTS price_history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    barcode     TEXT    NOT NULL,
-    price       REAL    NOT NULL,
-    currency    TEXT    NOT NULL,
-    changed_at  TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS ix_history_barcode ON price_history(barcode);
-CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-"""
-
-
-@contextmanager
-def db() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+db = database.connect
 
 
 def init_db() -> None:
     with db() as conn:
-        conn.executescript(SCHEMA)
+        for stmt in database.schema():
+            conn.execute(stmt)
         conn.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES ('khr_per_usd', ?)",
+            "INSERT INTO settings(key, value) VALUES ('khr_per_usd', ?) ON CONFLICT DO NOTHING",
             (str(DEFAULT_RATE),),
         )
 
@@ -87,7 +54,7 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def get_rate(conn: sqlite3.Connection) -> float:
+def get_rate(conn) -> float:
     row = conn.execute("SELECT value FROM settings WHERE key='khr_per_usd'").fetchone()
     return float(row["value"]) if row else DEFAULT_RATE
 
@@ -150,7 +117,7 @@ class Summary(BaseModel):
     categories: list[str]
 
 
-def to_out(row: sqlite3.Row, rate: float) -> ItemOut:
+def to_out(row, rate: float) -> ItemOut:
     usd, khr = to_both(row["price"], row["currency"], rate)
     margin = None
     if row["cost"] is not None and row["price"] > 0:
@@ -174,8 +141,37 @@ def to_out(row: sqlite3.Row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-app = FastAPI(title="Grocery Price Tracker", version="1.0.0")
+app = FastAPI(title="Grocery Price Tracker", version="1.1.0")
 init_db()
+
+PUBLIC_PATHS = {"/healthz"}
+
+
+@app.middleware("http")
+async def require_password(request: Request, call_next):
+    """If APP_PASSWORD is set, every page and API call needs it (browser login box).
+
+    The username can be anything (e.g. "shop"); only the password is checked.
+    """
+    password = os.environ.get("APP_PASSWORD", "")
+    if password and request.url.path not in PUBLIC_PATHS:
+        ok = False
+        header = request.headers.get("authorization", "")
+        if header.lower().startswith("basic "):
+            try:
+                _, _, given = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+                ok = secrets.compare_digest(given.encode(), password.encode())
+            except (ValueError, UnicodeDecodeError):
+                ok = False
+        if not ok:
+            return Response("Login required", status_code=401,
+                            headers={"WWW-Authenticate": 'Basic realm="Grocery shop"'})
+    return await call_next(request)
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    return {"ok": True, "database": database.backend_name()}
 
 
 @app.get("/", include_in_schema=False)
@@ -195,13 +191,13 @@ def list_items(
     sql = "SELECT * FROM items WHERE 1=1"
     args: list = []
     if q:
-        sql += " AND (name LIKE ? OR barcode LIKE ? OR category LIKE ?)"
-        like = f"%{q.strip()}%"
+        sql += " AND (lower(name) LIKE ? OR barcode LIKE ? OR lower(category) LIKE ?)"
+        like = f"%{q.strip().lower()}%"
         args += [like, like, like]
     if category:
         sql += " AND category = ?"
         args.append(category)
-    sql += " ORDER BY name COLLATE NOCASE LIMIT ?"
+    sql += " ORDER BY lower(name) LIMIT ?"
     args.append(limit)
     with db() as conn:
         rate = get_rate(conn)
@@ -311,7 +307,7 @@ def summary():
 def export_csv():
     with db() as conn:
         rate = get_rate(conn)
-        items = [to_out(r, rate) for r in conn.execute("SELECT * FROM items ORDER BY name")]
+        items = [to_out(r, rate) for r in conn.execute("SELECT * FROM items ORDER BY lower(name)")]
     buf = io.StringIO()
     buf.write("﻿")  # BOM so Excel shows Khmer text correctly
     w = csv.writer(buf)
@@ -326,3 +322,66 @@ def export_csv():
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=grocery_prices.csv"},
     )
+
+
+# --------------------------------------------------------------------------
+# Backup / restore (used by backup.py to copy everything to Google Drive)
+# --------------------------------------------------------------------------
+class HistoryRow(HistoryOut):
+    barcode: str
+
+
+class Backup(BaseModel):
+    app: str = "grocery-price-tracker"
+    version: int = 1
+    created_at: str
+    khr_per_usd: float
+    items: list[ItemIn]
+    history: list[HistoryRow]
+    updated_at: dict[str, str] = {}
+
+
+@app.get("/api/backup", response_model=Backup)
+def backup():
+    """Everything in one JSON document: items, price history and the rate."""
+    with db() as conn:
+        items = conn.execute("SELECT * FROM items ORDER BY barcode").fetchall()
+        hist = conn.execute(
+            "SELECT barcode,price,currency,changed_at FROM price_history ORDER BY id"
+        ).fetchall()
+        return Backup(
+            created_at=now(),
+            khr_per_usd=get_rate(conn),
+            items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields}) for r in items],
+            history=[HistoryRow(**dict(r)) for r in hist],
+            updated_at={r["barcode"]: r["updated_at"] for r in items},
+        )
+
+
+@app.post("/api/restore")
+def restore(data: Backup, confirm: bool = False):
+    """Replace ALL data with a backup. Needs ?confirm=true as a safety catch."""
+    if not confirm:
+        raise HTTPException(400, "Restore replaces all data. Call again with ?confirm=true")
+    ts = now()
+    with db() as conn:  # one transaction: all or nothing
+        conn.execute("DELETE FROM price_history")
+        conn.execute("DELETE FROM items")
+        for i in data.items:
+            conn.execute(
+                "INSERT INTO items(barcode,name,category,price,currency,cost,stock,updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (i.barcode, i.name, i.category, i.price, i.currency, i.cost, i.stock,
+                 data.updated_at.get(i.barcode, ts)),
+            )
+        for h in data.history:
+            conn.execute(
+                "INSERT INTO price_history(barcode,price,currency,changed_at) VALUES (?,?,?,?)",
+                (h.barcode, h.price, h.currency, h.changed_at),
+            )
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES ('khr_per_usd',?)"
+            " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(data.khr_per_usd),),
+        )
+    return {"restored_items": len(data.items), "restored_history": len(data.history)}
