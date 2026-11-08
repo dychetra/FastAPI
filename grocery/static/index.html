@@ -224,7 +224,11 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 
 // ---------- rate ----------
 async function loadRate() {
-  RATE = (await api("/api/settings/rate")).khr_per_usd;
+  try { RATE = (await api("/api/settings/rate")).khr_per_usd; }
+  catch (err) {
+    flash("Cannot reach the database — try again in a minute. · មិនអាចភ្ជាប់ទិន្នន័យ", "warn");
+    $("#rateLabel").textContent = "⚠ offline"; return;
+  }
   $("#rateLabel").textContent = `1 USD = ${RATE.toLocaleString()} KHR`;
   $("#rate").value = RATE;
 }

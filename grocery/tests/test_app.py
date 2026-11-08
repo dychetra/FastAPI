@@ -226,3 +226,22 @@ def test_lookup_suggests_same_company_item(client, monkeypatch):
 def test_healthz_version_and_page_not_cached(client):
     assert client.get("/healthz").json()["version"]
     assert client.get("/").headers["cache-control"] == "no-cache"
+
+
+def test_app_starts_and_reports_when_database_is_down(tmp_path, monkeypatch):
+    # unreachable Postgres: the app must still start, explain, and recover later
+    monkeypatch.setenv("APP_PASSWORD", "")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:secretpw@127.0.0.1:1/x?connect_timeout=1")
+    import main
+    importlib.reload(main)
+    c = TestClient(main.app)
+    h = c.get("/healthz").json()
+    assert h["ok"] is False and "OperationalError" in h["database_error"]
+    assert "secretpw" not in h["database_error"]
+    assert c.get("/").status_code == 200                   # page still loads
+    r = c.get("/api/items")
+    assert r.status_code == 503 and "Database not reachable" in r.json()["detail"]
+    monkeypatch.setenv("DATABASE_URL", "")                  # database back
+    monkeypatch.setenv("GROCERY_DB", str(tmp_path / "back.db"))
+    assert c.get("/api/items").status_code == 200
+    assert c.get("/healthz").json()["ok"] is True

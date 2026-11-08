@@ -26,7 +26,8 @@ from typing import Literal, Optional
 import httpx
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -145,9 +146,27 @@ def to_out(row, rate: float) -> ItemOut:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
-init_db()
+# Start even if the database is briefly unreachable (e.g. Neon waking up or a
+# network blip): a crash here would take the whole app offline (Render 502).
+_db_state = {"ready": False, "error": ""}
+
+
+def ensure_db() -> bool:
+    """Create tables once; remember the last error instead of crashing."""
+    if _db_state["ready"]:
+        return True
+    try:
+        init_db()
+        _db_state.update(ready=True, error="")
+    except Exception as exc:  # noqa: BLE001 - report any driver error
+        msg = re.sub(r"postgres(ql)?://\S+", "postgresql://***", str(exc)).strip()
+        _db_state["error"] = f"{type(exc).__name__}: {msg.splitlines()[0] if msg else ''}"[:300]
+    return _db_state["ready"]
+
+
+ensure_db()
 
 # Open without login: health check, plus the app name/icons so phones can show
 # them on the home screen (they fetch these without the password).
@@ -180,12 +199,19 @@ async def require_password(request: Request, call_next):
         if not ok:
             return Response("Login required", status_code=401,
                             headers={"WWW-Authenticate": 'Basic realm="ScanPrice"'})
+    if request.url.path.startswith("/api/") and not _db_state["ready"]:
+        if not await run_in_threadpool(ensure_db):
+            return JSONResponse({"detail": "Database not reachable: " + _db_state["error"]},
+                                status_code=503)
     return await call_next(request)
 
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    info = {"ok": True, "version": APP_VERSION, "database": database.backend_name()}
+    db_ok = ensure_db()
+    info = {"ok": db_ok, "version": APP_VERSION, "database": database.backend_name()}
+    if not db_ok:
+        info["database_error"] = _db_state["error"]
     if info["database"] == "sqlite":
         raw = os.environ.get("DATABASE_URL", "").strip()
         info["hint"] = (
