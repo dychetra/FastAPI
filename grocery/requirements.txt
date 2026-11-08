@@ -2,6 +2,6 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 psycopg[binary]>=3.1   # Neon / Postgres
 cryptography>=42      # run_https.py (phone camera over Wi-Fi)
+httpx>=0.27            # product-name lookup online
 # for tests
-httpx>=0.27
 pytest>=8

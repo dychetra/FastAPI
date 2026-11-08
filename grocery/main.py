@@ -13,13 +13,17 @@ local SQLite file (grocery.db). Set APP_PASSWORD to require a login.
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import re
 import csv
 import io
 import os
 import secrets
 from datetime import datetime, timezone
 from typing import Literal, Optional
+
+import httpx
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -401,3 +405,108 @@ def restore(data: Backup, confirm: bool = False):
             (str(data.khr_per_usd),),
         )
     return {"restored_items": len(data.items), "restored_history": len(data.history)}
+
+
+# --------------------------------------------------------------------------
+# Online product-name lookup (Open Food Facts and sister databases)
+# --------------------------------------------------------------------------
+# Free, open databases built by volunteers; no account or key needed.
+# Coverage of local products varies; the user can always correct the name.
+LOOKUP_SOURCES = [
+    ("Open Food Facts", "https://world.openfoodfacts.org"),
+    ("Open Beauty Facts", "https://world.openbeautyfacts.org"),
+    ("Open Products Facts", "https://world.openproductsfacts.org"),
+]
+LOOKUP_FIELDS = "product_name,product_name_en,brands,quantity,categories_tags,image_front_small_url"
+USER_AGENT = "ScanPrice/1.3 (family grocery price app)"
+_lookup_cache: dict[str, dict] = {}
+
+# first matching tag wins; order matters (beer before generic beverages)
+CATEGORY_RULES = [
+    ("Beer & Alcohol", ("alcoholic-beverages", "beers", "wines", "spirits")),
+    ("Water", ("waters",)),
+    ("Drinks", ("beverages", "drinks", "juices", "sodas", "teas", "coffees")),
+    ("Noodles", ("noodles", "instant-noodles")),
+    ("Rice", ("rices",)),
+    ("Milk & Dairy", ("dairies", "milks", "yogurts", "cheeses")),
+    ("Snacks", ("snacks", "chips", "crisps", "biscuits", "cookies", "candies",
+                "confectioneries", "chocolates", "crackers")),
+    ("Cooking", ("sauces", "condiments", "fish-sauces", "seasonings", "oils",
+                 "vinegars", "sugars", "salts", "spices")),
+    ("Canned food", ("canned-foods",)),
+]
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^0-9a-z]", "", text.lower())
+
+
+def build_name(p: dict) -> str:
+    name = (p.get("product_name_en") or p.get("product_name") or "").strip()
+    brands = [b.strip() for b in (p.get("brands") or "").split(",") if b.strip()]
+    if brands and not any(_norm(b) and _norm(b) in _norm(name) for b in brands):
+        name = f"{brands[0]} {name}".strip()
+    qty = (p.get("quantity") or "").strip()
+    if qty and _norm(qty) not in _norm(name):
+        name = f"{name} {qty}".strip()
+    return re.sub(r"\s+", " ", name)[:200]
+
+
+def guess_category(p: dict, source: str) -> str:
+    tags = [t.split(":", 1)[-1] for t in p.get("categories_tags") or []]
+    for category, keys in CATEGORY_RULES:
+        if any(t in keys for t in tags):
+            return category
+    if source == "Open Beauty Facts":
+        return "Personal care"
+    if source == "Open Products Facts":
+        return "Household"
+    return ""
+
+
+async def fetch_product(client: httpx.AsyncClient, base: str, barcode: str) -> Optional[dict]:
+    """One database; returns the product dict or None. Never raises."""
+    try:
+        r = await client.get(f"{base}/api/v2/product/{barcode}.json",
+                             params={"fields": LOOKUP_FIELDS})
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        return data.get("product") if data.get("status") == 1 else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+class LookupOut(BaseModel):
+    found: bool
+    barcode: str
+    name: str = ""
+    category: str = ""
+    image_url: str = ""
+    source: str = ""
+
+
+@app.get("/api/lookup/{barcode}", response_model=LookupOut)
+async def lookup_online(barcode: str):
+    """Suggest a product name for a barcode that is not in the shop yet."""
+    barcode = barcode.strip()
+    if not re.fullmatch(r"\d{6,14}", barcode):  # only real product barcodes
+        return LookupOut(found=False, barcode=barcode)
+    if barcode in _lookup_cache:
+        return LookupOut(**_lookup_cache[barcode])
+    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": USER_AGENT},
+                                 follow_redirects=True) as client:
+        results = await asyncio.gather(
+            *(fetch_product(client, base, barcode) for _, base in LOOKUP_SOURCES))
+    out = {"found": False, "barcode": barcode}
+    for (source, _), product in zip(LOOKUP_SOURCES, results):
+        if product and build_name(product):
+            out = {"found": True, "barcode": barcode, "name": build_name(product),
+                   "category": guess_category(product, source),
+                   "image_url": product.get("image_front_small_url") or "",
+                   "source": source}
+            break
+    if len(_lookup_cache) > 2000:
+        _lookup_cache.clear()
+    _lookup_cache[barcode] = out
+    return LookupOut(**out)

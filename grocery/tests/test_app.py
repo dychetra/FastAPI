@@ -148,3 +148,57 @@ def test_database_url_cleans_copy_paste(monkeypatch, pasted):
 def test_healthz_hint_when_not_postgres(tmp_path, monkeypatch):
     c = make_client(tmp_path, monkeypatch, "sqlite")
     assert "not set" in c.get("/healthz").json()["hint"]
+
+
+# ---------------- online name lookup (network faked) ----------------
+COKE_TH = {"product_name": "Coca Cola", "product_name_en": "Coca Cola",
+           "brands": "Coke, Coca-Cola, โค๊ก", "quantity": "325 ml",
+           "categories_tags": ["en:beverages", "en:sodas"],
+           "image_front_small_url": "https://images.example/coke.jpg"}
+
+
+def fake_sources(monkeypatch, answers):
+    import main
+    calls = []
+
+    async def fake_fetch(client, base, barcode):
+        calls.append(base)
+        return answers.get(base)
+    monkeypatch.setattr(main, "fetch_product", fake_fetch)
+    main._lookup_cache.clear()
+    return calls
+
+
+def test_lookup_found_on_open_food_facts(client, monkeypatch):
+    fake_sources(monkeypatch, {"https://world.openfoodfacts.org": COKE_TH})
+    r = client.get("/api/lookup/8851959132012").json()
+    assert r["found"] and r["source"] == "Open Food Facts"
+    assert r["name"] == "Coca Cola 325 ml"          # brand already in name, size added
+    assert r["category"] == "Drinks"
+    assert r["image_url"].endswith("coke.jpg")
+
+
+def test_lookup_brand_prefix_and_other_sources(client, monkeypatch):
+    shampoo = {"product_name": "Shampoo Anti-dandruff", "brands": "Head & Shoulders",
+               "quantity": "170 ml", "categories_tags": []}
+    fake_sources(monkeypatch, {"https://world.openbeautyfacts.org": shampoo})
+    r = client.get("/api/lookup/4902430401234").json()
+    assert r["name"] == "Head & Shoulders Shampoo Anti-dandruff 170 ml"
+    assert r["category"] == "Personal care" and r["source"] == "Open Beauty Facts"
+
+
+def test_lookup_not_found_cached_and_skips_non_barcodes(client, monkeypatch):
+    calls = fake_sources(monkeypatch, {})
+    assert client.get("/api/lookup/8850999320045").json()["found"] is False
+    client.get("/api/lookup/8850999320045")
+    assert len(calls) == 3                            # 3 sources, second call cached
+    assert client.get("/api/lookup/veg01").json()["found"] is False
+    assert len(calls) == 3                            # own codes never sent online
+
+
+def test_category_rules():
+    import main
+    beer = {"categories_tags": ["en:beverages", "en:alcoholic-beverages", "en:beers"]}
+    assert main.guess_category(beer, "Open Food Facts") == "Beer & Alcohol"
+    assert main.guess_category({"categories_tags": ["en:instant-noodles"]}, "x") == "Noodles"
+    assert main.guess_category({}, "Open Products Facts") == "Household"

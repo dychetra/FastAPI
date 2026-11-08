@@ -117,6 +117,10 @@
     <!-- add / edit form -->
     <form id="form" class="card hidden" autocomplete="off">
       <div id="formTitle" class="item-name"></div>
+      <div id="suggest" class="msg ok hidden" style="display:flex;gap:10px;align-items:center">
+        <img id="suggestImg" alt="" style="width:56px;height:56px;object-fit:contain;border-radius:6px;background:#fff" class="hidden">
+        <div id="suggestText"></div>
+      </div>
       <label>Barcode · លេខបាកូដ</label>
       <input id="fBarcode" required>
       <label>Name · ឈ្មោះ</label>
@@ -287,11 +291,32 @@ async function openForm(it, isNew) {
   $("#fStock").value = it.stock ?? "";
   setCurrency(it.currency || "USD");
   $("#deleteBtn").classList.toggle("hidden", isNew);
-  if (isNew) flash("Not found — add it now · រកមិនឃើញ សូមបញ្ចូលថ្មី", "warn");
+  hide("#suggest");
+  if (isNew) flash("New item — add the price · ទំនិញថ្មី សូមបញ្ចូលតម្លៃ", "warn");
   const s = await api("/api/summary");
   $("#cats").innerHTML = s.categories.map(c => `<option value="${esc(c)}">`).join("");
   show("#form");
   (isNew ? $("#fName") : $("#fPrice")).focus();
+  if (isNew && it.barcode) suggestName(it.barcode);
+}
+
+// Ask the server to look the barcode up in the free online product databases
+// and pre-fill the name and category (only if the user has not typed yet).
+async function suggestName(code) {
+  $("#suggestText").textContent = "Looking up product name online… · កំពុងស្វែងរកឈ្មោះ…";
+  hide("#suggestImg"); show("#suggest");
+  let r = null;
+  try { r = await api("/api/lookup/" + encodeURIComponent(code)); } catch {}
+  if ($("#fBarcode").value.trim() !== code || $("#form").classList.contains("hidden")) return;
+  if (!r || !r.found) {
+    $("#suggestText").textContent = "Name not found online — please type it. · រកឈ្មោះមិនឃើញ សូមវាយបញ្ចូល";
+    return;
+  }
+  if (!$("#fName").value.trim()) $("#fName").value = r.name;
+  if (!$("#fCategory").value.trim() && r.category) $("#fCategory").value = r.category;
+  $("#suggestText").innerHTML = `Found: <b>${esc(r.name)}</b><br><span class="meta">from ${esc(r.source)} — check the name, then enter the price</span>`;
+  if (r.image_url) { $("#suggestImg").src = r.image_url; show("#suggestImg"); }
+  $("#fPrice").focus();
 }
 const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
 $("#form").onsubmit = async e => {
