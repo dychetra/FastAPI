@@ -7,3 +7,5 @@ __pycache__/
 backup-to-drive.bat
 backup-log.txt
 backups/
+cert.pem
+key.pem

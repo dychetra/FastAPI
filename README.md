@@ -29,18 +29,22 @@ Open http://localhost:8000 on the shop computer. API docs: http://localhost:8000
 **Easiest setup:** a cheap USB barcode scanner plugged into the shop PC. It types the
 number and presses Enter, so the price shows straight away.
 
-## Using a phone camera
+## Using phones on the shop Wi-Fi (camera scanning)
 
-Browsers only allow the camera on `https://` or `localhost`. To use phones on the
-shop Wi-Fi, run with a self-signed certificate:
+Phone browsers only allow the camera on `https://` pages, so start the app with:
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=grocery" \
-  -keyout key.pem -out cert.pem
-uvicorn main:app --host 0.0.0.0 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem
+python run_https.py
 ```
 
-Then on the phone open `https://<PC-IP-address>:8443` and accept the warning once.
+It prints an address like `https://192.168.1.20:8443`. Open it on any phone connected
+to the **same Wi-Fi**. The first time, the phone warns "connection not private" (the
+certificate is made by your own PC):
+- **Android Chrome:** *Advanced* → *Proceed to 192.168.1.20 (unsafe)*
+- **iPhone Safari:** *Show Details* → *visit this website*
+
+Tips: tap **Add to Home Screen** to use it like an app. If the phone cannot connect, allow
+Python through the Windows Firewall (Windows asks the first time — tick *Private networks*).
 The camera scanner library loads from the internet (unpkg.com).
 
 ## Option B — put it online (free): Neon + Render
