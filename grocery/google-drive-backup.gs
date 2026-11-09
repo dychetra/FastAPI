@@ -15,7 +15,8 @@
  *   2. Project Settings (gear) -> Script properties -> Add:
  *        APP_PASSWORD = the ScanPrice shop password
  *   3. Select "dailyBackup" -> Run -> allow access. Check the Drive folder.
- *   4. Select "installDailyTrigger" -> Run once. Done: it runs every evening.
+ *   4. Select "installHourlyTrigger" -> Run once: every hour 6 am - 10 pm.
+ *      (or "installDailyTrigger" for once a day at 9 pm; each replaces the other)
  * Google e-mails you if a scheduled run fails.
  */
 
@@ -46,9 +47,27 @@ function dailyBackup() {
               (p.postponed ? ', ' + p.postponed + ' left for next run' : '') + ')');
 }
 
+// ---- hourly during shop hours (each run replaces today's files with the newest data)
+const HOURLY_FROM = 6;   // first run 6 am
+const HOURLY_TO = 22;    // last run 10 pm (Cambodia time)
+
+function hourlyBackup() {
+  const h = Number(Utilities.formatDate(new Date(), TIME_ZONE, 'H'));
+  if (h < HOURLY_FROM || h > HOURLY_TO) return;   // shop closed: let the app sleep
+  dailyBackup();
+}
+
+function installHourlyTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return ['dailyBackup', 'hourlyBackup'].indexOf(t.getHandlerFunction()) >= 0; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('hourlyBackup').timeBased().everyHours(1).create();
+  console.log('Backup scheduled every hour from ' + HOURLY_FROM + ':00 to ' + HOURLY_TO + ':00 ' + TIME_ZONE);
+}
+
 function installDailyTrigger() {
   ScriptApp.getProjectTriggers()
-    .filter(function (t) { return t.getHandlerFunction() === 'dailyBackup'; })
+    .filter(function (t) { return ['dailyBackup', 'hourlyBackup'].indexOf(t.getHandlerFunction()) >= 0; })
     .forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('dailyBackup').timeBased().everyDays(1)
     .atHour(RUN_AT_HOUR).inTimezone(TIME_ZONE).create();
