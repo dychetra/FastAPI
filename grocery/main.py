@@ -117,6 +117,8 @@ class ItemIn(BaseModel):
     currency: Currency = "USD"
     cost: Optional[float] = Field(default=None, ge=0, description="Buying cost, same currency")
     stock: Optional[int] = Field(default=None, ge=0, description="in single pieces")
+    sku: Optional[str] = Field(default=None, max_length=32,
+                               description="shop's own product code, e.g. DRI-0001")
     # None = leave the selling types unchanged; [] = remove them all
     units: Optional[list[UnitIn]] = Field(default=None, max_length=10)
 
@@ -124,6 +126,12 @@ class ItemIn(BaseModel):
     @classmethod
     def strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("sku")
+    @classmethod
+    def tidy_sku(cls, v: Optional[str]) -> Optional[str]:
+        v = "".join((v or "").split()).upper()     # no spaces, capitals
+        return v or None
 
 
 # items joined with their photo (if any); use instead of "SELECT * FROM items"
@@ -196,6 +204,7 @@ def to_out(row, rate: float, units: Optional[list] = None, scanned_unit: Optiona
         currency=row["currency"],
         cost=row["cost"],
         stock=row["stock"],
+        sku=_col(row, "sku"),
         price_usd=usd,
         price_khr=khr,
         margin_pct=margin,
@@ -223,7 +232,7 @@ def photo_url_of(row) -> Optional[str]:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -318,9 +327,9 @@ def list_items(
     args: list = []
     if q:
         sql += (" AND (lower(items.name) LIKE ? OR items.barcode LIKE ?"
-                " OR lower(items.category) LIKE ?)")
+                " OR lower(items.category) LIKE ? OR lower(items.sku) LIKE ?)")
         like = f"%{q.strip().lower()}%"
-        args += [like, like, like]
+        args += [like, like, like, like]
     if category:
         sql += " AND items.category = ?"
         args.append(category)
@@ -351,6 +360,9 @@ def item_out(conn, barcode: str) -> ItemOut:
             scanned = u["unit"]
             row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?",
                                (u["item_barcode"],)).fetchone()
+    if not row:  # typed the shop's own SKU
+        row = conn.execute(ITEM_SELECT + " WHERE upper(items.sku)=?",
+                           ("".join(barcode.split()).upper(),)).fetchone()
     if not row:
         raise HTTPException(404, "Item not found")
     units = load_units(conn, [row["barcode"]]).get(row["barcode"])
@@ -393,21 +405,26 @@ def save_item(barcode: str, item: ItemIn):
         if conn.execute("SELECT item_barcode FROM item_units WHERE unit_barcode=?",
                         (barcode,)).fetchone():
             raise HTTPException(400, f"Barcode {barcode} is a pack/case of another item")
+        if item.sku:
+            other = conn.execute("SELECT barcode, name FROM items WHERE upper(sku)=? AND barcode<>?",
+                                 (item.sku, barcode)).fetchone()
+            if other:
+                raise HTTPException(400, f"SKU {item.sku} is already used by {other['name']}")
         old = conn.execute("SELECT * FROM items WHERE barcode=?", (barcode,)).fetchone()
         if old is None:
             conn.execute(
-                "INSERT INTO items(barcode,name,category,price,currency,cost,stock,updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO items(barcode,name,category,price,currency,cost,stock,updated_at,sku)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (barcode, item.name, item.category, item.price, item.currency,
-                 item.cost, item.stock, ts),
+                 item.cost, item.stock, ts, item.sku),
             )
             price_changed = True
         else:
             conn.execute(
-                "UPDATE items SET name=?,category=?,price=?,currency=?,cost=?,stock=?,updated_at=?"
-                " WHERE barcode=?",
+                "UPDATE items SET name=?,category=?,price=?,currency=?,cost=?,stock=?,updated_at=?,"
+                "sku=? WHERE barcode=?",
                 (item.name, item.category, item.price, item.currency, item.cost,
-                 item.stock, ts, barcode),
+                 item.stock, ts, item.sku, barcode),
             )
             price_changed = old["price"] != item.price or old["currency"] != item.currency
         if price_changed:
@@ -566,6 +583,23 @@ def save_categories(cats: list[Category]):
     return list_categories()
 
 
+def sku_prefix(category: str) -> str:
+    """Drinks -> DRI, Beer & Alcohol -> BEE, (none) -> ITM."""
+    letters = re.sub(r"[^A-Za-z]", "", category.split(" ")[0] if category else "")
+    return (letters[:3] or "ITM").upper().ljust(3, "X")
+
+
+@app.get("/api/sku/next")
+def next_sku(category: str = ""):
+    """Suggest the next free SKU for a category, e.g. DRI-0007."""
+    prefix = sku_prefix(category)
+    with db() as conn:
+        used = [r["sku"] for r in conn.execute(
+            "SELECT sku FROM items WHERE upper(sku) LIKE ?", (prefix + "-%",)).fetchall()]
+    nums = [int(m.group(1)) for u in used if (m := re.fullmatch(rf"{prefix}-(\d+)", u.upper()))]
+    return {"sku": f"{prefix}-{(max(nums) + 1) if nums else 1:04d}"}
+
+
 DEFAULT_UNIT_TYPES = [("ដុំ", "Wholesale"), ("កញ្ជប់", "Pack"), ("គេស", "Case"),
                       ("ឡូ", "Dozen"), ("ប្រអប់", "Box"), ("បាវ", "Sack")]
 
@@ -607,12 +641,12 @@ def export_csv():
     buf = io.StringIO()
     buf.write("﻿")  # BOM so Excel shows Khmer text correctly
     w = csv.writer(buf)
-    w.writerow(["barcode", "name", "category", "price", "currency", "price_usd",
+    w.writerow(["barcode", "sku", "name", "category", "price", "currency", "price_usd",
                 "price_khr", "cost", "margin_pct", "stock", "selling_types", "updated_at"])
     for i in items:
         types = "; ".join(f"{u.unit} x{u.qty} = {u.price} {i.currency}"
                           + (f" [{u.barcode}]" if u.barcode else "") for u in i.units)
-        w.writerow([i.barcode, i.name, i.category, i.price, i.currency, i.price_usd,
+        w.writerow([i.barcode, i.sku, i.name, i.category, i.price, i.currency, i.price_usd,
                     i.price_khr, i.cost, i.margin_pct, i.stock, types, i.updated_at])
     buf.seek(0)
     return StreamingResponse(
@@ -690,10 +724,10 @@ def restore(data: Backup, confirm: bool = False):
         conn.execute("DELETE FROM items")
         for i in data.items:
             conn.execute(
-                "INSERT INTO items(barcode,name,category,price,currency,cost,stock,updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO items(barcode,name,category,price,currency,cost,stock,updated_at,sku)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (i.barcode, i.name, i.category, i.price, i.currency, i.cost, i.stock,
-                 data.updated_at.get(i.barcode, ts)),
+                 data.updated_at.get(i.barcode, ts), i.sku),
             )
         for i in data.items:
             if i.units:

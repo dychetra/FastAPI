@@ -491,3 +491,29 @@ def test_old_database_gets_new_columns(tmp_path, monkeypatch):
     importlib.reload(main)
     cols = [r[1] for r in sqlite3.connect(dbf).execute("PRAGMA table_info(sale_items)")]
     assert "unit" in cols and "pieces" in cols
+
+
+# ---------------- SKU ----------------
+def test_sku_save_unique_lookup_search_and_auto(client):
+    r = client.put("/api/items/111", json=item(barcode="111", name="Coke", category="Drinks", sku=" dri-0001 "))
+    assert r.json()["sku"] == "DRI-0001"                                # tidied: no spaces, capitals
+    assert client.get("/api/items/dri-0001").json()["barcode"] == "111"   # typing the SKU finds it
+    dup = client.put("/api/items/222", json=item(barcode="222", sku="DRI-0001"))
+    assert dup.status_code == 400 and "Coke" in dup.json()["detail"]
+    assert client.get("/api/items", params={"q": "dri-00"}).json()[0]["sku"] == "DRI-0001"
+    assert client.get("/api/sku/next", params={"category": "Drinks"}).json()["sku"] == "DRI-0002"
+    assert client.get("/api/sku/next", params={"category": "Beer & Alcohol"}).json()["sku"] == "BEE-0001"
+    assert client.get("/api/sku/next").json()["sku"] == "ITM-0001"
+    client.put("/api/items/111", json=item(barcode="111", name="Coke", sku=""))  # clear it
+    assert client.get("/api/items/111").json()["sku"] is None
+    assert client.put("/api/items/222", json=item(barcode="222", sku="DRI-0001")).status_code == 200
+
+
+def test_sku_in_csv_backup_restore_and_sale_by_sku(client):
+    client.put("/api/items/111", json=item(barcode="111", name="Rice 5kg", sku="RIC-0001", stock=10))
+    assert "RIC-0001" in client.get("/api/export.csv").text
+    snap = client.get("/api/backup").json()
+    assert snap["items"][0]["sku"] == "RIC-0001"
+    client.put("/api/items/111", json=item(barcode="111", name="Rice 5kg", sku=None))
+    client.post("/api/restore?confirm=true", json=snap)
+    assert client.get("/api/items/ric-0001").json()["name"] == "Rice 5kg"

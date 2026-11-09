@@ -165,6 +165,7 @@ def schema() -> list[str]:
 LATER_COLUMNS = [
     ("sale_items", "unit", "TEXT"),       # selling type, '' = single piece
     ("sale_items", "pieces", "INTEGER"),  # pieces per unit sold (case = 24)
+    ("items", "sku", "TEXT"),             # shop's own product code, e.g. DRI-0001
 ]
 
 
@@ -177,3 +178,6 @@ def add_missing_columns(conn: "Conn") -> None:
             cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if col not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    # SKUs are unique when set (case-insensitive)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_items_sku ON items (upper(sku)) "
+                 "WHERE sku IS NOT NULL")

@@ -108,7 +108,7 @@
     <div class="card">
       <label for="code">Barcode · លេខបាកូដ (type, or use a USB scanner, then Enter)</label>
       <div class="row">
-        <input id="code" inputmode="numeric" autocomplete="off" autofocus placeholder="e.g. 8851234567890">
+        <input id="code" autocomplete="off" autofocus placeholder="Barcode or SKU">
         <button class="btn primary" style="flex:0 0 auto" id="lookupBtn">Check · ពិនិត្យ</button>
       </div>
       <div class="row" style="margin-top:10px">
@@ -170,6 +170,11 @@
       <input id="fName" required maxlength="200">
       <label>Category · ប្រភេទ</label>
       <select id="fCategory"></select>
+      <label>SKU · លេខកូដហាង <span style="font-weight:400">— your own product code (optional)</span></label>
+      <div class="row">
+        <input id="fSku" maxlength="32" autocomplete="off" placeholder="e.g. DRI-0001" style="text-transform:uppercase">
+        <button type="button" class="btn" id="skuAuto" style="flex:0 0 auto">⚙ Auto</button>
+      </div>
       <label>Currency · រូបិយប័ណ្ណ</label>
       <div class="seg" id="fCurrency">
         <button type="button" data-cur="USD" class="on">$ USD</button>
@@ -207,7 +212,7 @@
     <div class="card">
       <label for="sellCode">Scan items · ស្កេនទំនិញ (camera, USB scanner, or type + Enter)</label>
       <div class="row">
-        <input id="sellCode" inputmode="numeric" autocomplete="off" placeholder="Barcode">
+        <input id="sellCode" autocomplete="off" placeholder="Barcode or SKU">
         <button class="btn primary" style="flex:0 0 auto" id="sellAdd">Add · បន្ថែម</button>
       </div>
       <div class="row" style="margin-top:10px">
@@ -469,6 +474,7 @@ function showItem(it) {
         <span class="meta">${u.qty > 1 ? " · " + usd(u.price_usd / u.qty) + "/pc" : ""}</span></span></div>`).join("");
   $("#rUnits").classList.toggle("hidden", !(it.units || []).length);
   const bits = [`Barcode ${esc(it.barcode)}`];
+  if (it.sku) bits.push(`SKU <b>${esc(it.sku)}</b>`);
   if (it.category) bits.push(esc(it.category));
   if (it.margin_pct !== null) bits.push(`Margin ${it.margin_pct}%`);
   if (it.stock !== null) bits.push(`Stock ${it.stock}`);
@@ -511,6 +517,7 @@ async function openForm(it, isNew) {
   $("#fPrice").value = it.price ?? "";
   $("#fCost").value = it.cost ?? "";
   $("#fStock").value = it.stock ?? "";
+  $("#fSku").value = it.sku || "";
   setCurrency(it.currency || "USD");
   $("#deleteBtn").classList.toggle("hidden", isNew);
   pendingPhoto = null; showFormPhoto(it.photo_url || null);
@@ -607,6 +614,13 @@ function collectUnits() {
   return out;
 }
 
+// ---------- SKU ----------
+$("#skuAuto").onclick = async () => {
+  const cat = $("#fCategory").value === "__new__" ? "" : $("#fCategory").value;
+  try { $("#fSku").value = (await api("/api/sku/next?category=" + encodeURIComponent(cat))).sku; }
+  catch { alert("Could not make a SKU — check the internet."); }
+};
+
 // ---------- product photo ----------
 // The phone shrinks the photo to max 480 px JPEG (~20-40 KB) before upload.
 let pendingPhoto = null;   // {blob} | {link} | {remove: true} | null (no change)
@@ -655,7 +669,7 @@ $("#form").onsubmit = async e => {
   const body = {
     barcode: $("#fBarcode").value.trim(), name: $("#fName").value.trim(),
     category: $("#fCategory").value.trim(), price: num("#fPrice"), currency,
-    cost: num("#fCost"), stock: num("#fStock"),
+    cost: num("#fCost"), stock: num("#fStock"), sku: $("#fSku").value.trim() || null,
   };
   try { body.units = collectUnits(); } catch (err) { return alert(err.message); }
   try {
@@ -1045,7 +1059,7 @@ async function loadList() {
   $("#list").innerHTML = items.map(i => `
     <tr class="click" data-code="${esc(i.barcode)}">
       <td><div class="namecell">${i.photo_url ? `<img class="thumb" loading="lazy" alt="" src="${esc(i.photo_url)}">` : ""}
-        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(catLabel(i.category)) : ""}${(i.units || []).length ? " · " + i.units.map(u => esc(u.unit)).join("/") : ""}</div></div></div></td>
+        <div><b>${esc(i.name)}</b><div class="meta">${i.sku ? `<b>${esc(i.sku)}</b> · ` : ""}${esc(i.barcode)}${i.category ? " · " + esc(catLabel(i.category)) : ""}${(i.units || []).length ? " · " + i.units.map(u => esc(u.unit)).join("/") : ""}</div></div></div></td>
       <td class="num">${usd(i.price_usd)}</td><td class="num">${khr(i.price_khr)}</td>
     </tr>`).join("");
   $("#listInfo").textContent = `${items.length} item(s)`;
