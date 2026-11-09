@@ -16,7 +16,7 @@ def make_client(tmp_path, monkeypatch, backend, password=""):
         monkeypatch.setenv("DATABASE_URL", url)
         import psycopg
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("DROP TABLE IF EXISTS items, price_history, settings, sales, sale_items, item_photos")
+            c.execute("DROP TABLE IF EXISTS items, price_history, settings, sales, sale_items, item_photos, item_units")
     else:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setenv("GROCERY_DB", str(tmp_path / "test.db"))
@@ -406,3 +406,88 @@ def test_categories_default_counts_add_remove_reset(client):
     assert len(client.get("/api/categories").json()) >= 21
     client.post("/api/restore?confirm=true", json=snap)
     assert [c["name"] for c in client.get("/api/categories").json()][:2] == ["Drinks", "Ice cream"]
+
+
+# ---------------- selling types (រាយ / ដុំ / កញ្ជប់ / គេស) ----------------
+BEER = {"barcode": "8848", "name": "Angkor can", "category": "Beer & Alcohol", "price": 0.75,
+        "currency": "USD", "cost": 0.55, "stock": 100,
+        "units": [{"unit": "កញ្ជប់", "qty": 6, "price": 4.2},
+                  {"unit": "គេស", "qty": 24, "price": 15.5, "barcode": "18848"}]}
+
+
+def test_units_saved_listed_and_found_by_case_barcode(client):
+    r = client.put("/api/items/8848", json=BEER).json()
+    assert [(u["unit"], u["qty"], u["price"]) for u in r["units"]] == [("កញ្ជប់", 6, 4.2), ("គេស", 24, 15.5)]
+    case = r["units"][1]
+    assert case["price_khr"] == 63600 and case["per_piece_usd"] == round(15.5 / 24, 3)
+    found = client.get("/api/items/18848").json()            # scanning the CASE barcode
+    assert found["barcode"] == "8848" and found["scanned_unit"] == "គេស"
+    assert client.get("/api/items/8848").json()["scanned_unit"] is None
+    assert len(client.get("/api/items", params={"q": "angkor"}).json()[0]["units"]) == 2
+    # saving without "units" keeps them; [] removes them
+    client.put("/api/items/8848", json={k: v for k, v in BEER.items() if k != "units"} | {"price": 0.8})
+    assert len(client.get("/api/items/8848").json()["units"]) == 2
+    client.put("/api/items/8848", json=BEER | {"units": []})
+    assert client.get("/api/items/8848").json()["units"] == []
+    assert "selling_types" in client.get("/api/export.csv").text
+
+
+def test_units_validation(client):
+    client.put("/api/items/111", json=item(barcode="111"))
+    dup = BEER | {"units": [{"unit": "គេស", "qty": 24, "price": 15}, {"unit": "គេស", "qty": 12, "price": 8}]}
+    assert client.put("/api/items/8848", json=dup).status_code == 400
+    taken = BEER | {"units": [{"unit": "គេស", "qty": 24, "price": 15, "barcode": "111"}]}
+    assert client.put("/api/items/8848", json=taken).status_code == 400     # belongs to item 111
+    client.put("/api/items/8848", json=BEER)
+    assert client.put("/api/items/18848", json=item(barcode="18848")).status_code == 400
+    assert client.put("/api/items/8848", json=BEER | {"units": [{"unit": "x", "qty": 0, "price": 1}]}).status_code == 422
+
+
+def test_sale_with_units_prices_stock_profit_and_cancel(client):
+    client.put("/api/items/8848", json=BEER)
+    s = client.post("/api/sales", json={"items": [
+        {"barcode": "8848", "qty": 3},                        # 3 single cans
+        {"barcode": "18848", "qty": 1},                       # scanned case barcode
+        {"barcode": "8848", "qty": 2, "unit": "កញ្ជប់"},       # 2 packs of 6
+    ]}).json()
+    lines = {(l["unit"], l["qty"], l["pieces"]): l["price"] for l in s["lines"]}
+    assert lines == {("", 3, 1): 0.75, ("គេស", 1, 24): 15.5, ("កញ្ជប់", 2, 6): 4.2}
+    # 3x0.75 + 15.5 + 2x4.2 = 26.15 USD
+    assert s["total_usd"] == 26.15
+    # cost per piece 0.55 x (3 + 24 + 12 = 39 pieces) = 21.45 -> profit 4.70
+    assert s["profit_usd"] == 4.7
+    assert client.get("/api/items/8848").json()["stock"] == 100 - 39
+    assert client.post("/api/sales", json={"items": [{"barcode": "8848", "qty": 1, "unit": "ឡូ"}]}).status_code == 400
+    client.delete(f"/api/sales/{s['id']}")
+    assert client.get("/api/items/8848").json()["stock"] == 100
+
+
+def test_units_in_backup_restore_and_suggestions(client):
+    client.put("/api/items/8848", json=BEER)
+    client.post("/api/sales", json={"items": [{"barcode": "18848", "qty": 1}]})
+    snap = client.get("/api/backup").json()
+    assert snap["items"][0]["units"][1]["barcode"] == "18848"
+    assert snap["sale_items"][0]["unit"] == "គេស" and snap["sale_items"][0]["pieces"] == 24
+    client.put("/api/items/8848", json=BEER | {"units": []})
+    client.post("/api/restore?confirm=true", json=snap)
+    assert client.get("/api/items/18848").json()["scanned_unit"] == "គេស"
+    names = [u["name"] for u in client.get("/api/unit-types").json()]
+    assert names[:3] == ["ដុំ", "កញ្ជប់", "គេស"]
+
+
+def test_old_database_gets_new_columns(tmp_path, monkeypatch):
+    # a database created before v2.0 (sale_items without unit/pieces) is upgraded on start
+    import sqlite3
+    dbf = tmp_path / "old.db"
+    con = sqlite3.connect(dbf)
+    con.execute("CREATE TABLE sale_items (id INTEGER PRIMARY KEY AUTOINCREMENT, sale_id INTEGER NOT NULL,"
+                " barcode TEXT NOT NULL, name TEXT NOT NULL, qty INTEGER NOT NULL, price REAL NOT NULL,"
+                " currency TEXT NOT NULL, line_khr REAL NOT NULL, cost REAL)")
+    con.commit(); con.close()
+    monkeypatch.setenv("GROCERY_DB", str(dbf))
+    c = make_client(tmp_path, monkeypatch, "sqlite")   # make_client points GROCERY_DB elsewhere
+    monkeypatch.setenv("GROCERY_DB", str(dbf))
+    import main
+    importlib.reload(main)
+    cols = [r[1] for r in sqlite3.connect(dbf).execute("PRAGMA table_info(sale_items)")]
+    assert "unit" in cols and "pieces" in cols

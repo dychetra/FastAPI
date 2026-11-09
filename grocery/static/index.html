@@ -73,6 +73,14 @@
   .thumb.big { width:96px; height:96px; }
   .thumb.sm { width:34px; height:34px; }
   .namecell { display:flex; gap:8px; align-items:center; }
+  .unitrow { display:grid; grid-template-columns:1.3fr .7fr 1fr auto; gap:6px; padding:8px;
+             border:1px solid var(--line); border-radius:8px; margin-bottom:8px; background:#fafafa; }
+  .unitrow input { padding:9px 8px; }
+  .unitrow .u-code, .unitrow .u-info { grid-column:1 / -1; }
+  .unitlist { margin-top:8px; border-top:1px solid var(--line); }
+  .unitlist div { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-bottom:1px solid var(--line); font-size:15px; }
+  .unitlist div.on { background:#ecfdf5; font-weight:600; }
+  .unitsel { font-size:13px; padding:4px 6px; margin-top:4px; width:auto; }
   #catChips { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
   .catchip { display:inline-flex; align-items:center; gap:4px; padding:6px 6px 6px 10px; border:1px solid var(--line);
              border-radius:16px; background:#fff; font-size:14px; }
@@ -126,6 +134,7 @@
       <div class="item-name" id="rName"></div>
       <div class="price-big" id="rMain"></div>
       <div class="price-alt" id="rAlt"></div>
+      <div class="unitlist hidden" id="rUnits"></div>
       <div class="meta" id="rMeta" style="margin-top:8px"></div>
       <div class="row" style="margin-top:12px">
         <button class="btn" id="editBtn">✏️ Edit price · កែតម្លៃ</button>
@@ -177,6 +186,10 @@
         </div>
       </div>
       <div class="meta" id="fPreview" style="margin-top:6px"></div>
+      <label>Selling types · ប្រភេទលក់ <span style="font-weight:400">— the price above is រាយ (1 piece)</span></label>
+      <div id="unitRows"></div>
+      <button type="button" class="btn" id="unitAdd">➕ Add type · ដុំ / កញ្ជប់ / គេស …</button>
+      <datalist id="unitTypes"></datalist>
       <label>Stock qty (optional) · ចំនួនស្តុក</label>
       <input id="fStock" type="number" step="1" min="0">
       <div class="row" style="margin-top:16px">
@@ -442,10 +455,19 @@ function showItem(it) {
   current = it;
   setImg($("#rPhoto"), it.photo_url);
   $("#rName").textContent = it.name;
-  const main = it.currency === "USD" ? usd(it.price_usd) : khr(it.price_khr);
-  const alt = it.currency === "USD" ? "≈ " + khr(it.price_khr) : "≈ " + usd(it.price_usd);
+  // a scanned pack/case barcode shows that unit's price first
+  const su = it.scanned_unit && (it.units || []).find(u => u.unit === it.scanned_unit);
+  const p = su || it;
+  const main = it.currency === "USD" ? usd(p.price_usd) : khr(p.price_khr);
+  const alt = it.currency === "USD" ? "≈ " + khr(p.price_khr) : "≈ " + usd(p.price_usd);
   $("#rMain").textContent = main;
-  $("#rAlt").textContent = alt;
+  $("#rAlt").textContent = alt + (su ? `  ·  ${su.unit} (${su.qty} pcs)` : (it.units?.length ? "  ·  រាយ (1 pc)" : ""));
+  const rows = [{ unit: "រាយ", qty: 1, price_usd: it.price_usd, price_khr: it.price_khr }, ...(it.units || [])];
+  $("#rUnits").innerHTML = rows.map(u => `<div class="${(su ? su.unit : "រាយ") === u.unit ? "on" : ""}">
+      <span>${esc(u.unit)} <span class="meta">(${u.qty} pc${u.qty > 1 ? "s" : ""})</span></span>
+      <span>${it.currency === "USD" ? usd(u.price_usd) : khr(u.price_khr)}
+        <span class="meta">${u.qty > 1 ? " · " + usd(u.price_usd / u.qty) + "/pc" : ""}</span></span></div>`).join("");
+  $("#rUnits").classList.toggle("hidden", !(it.units || []).length);
   const bits = [`Barcode ${esc(it.barcode)}`];
   if (it.category) bits.push(esc(it.category));
   if (it.margin_pct !== null) bits.push(`Margin ${it.margin_pct}%`);
@@ -473,6 +495,7 @@ function setCurrency(c) {
 }
 document.querySelectorAll("#fCurrency button").forEach(b => b.onclick = () => setCurrency(b.dataset.cur));
 function preview() {
+  document.querySelectorAll("#unitRows .unitrow").forEach(unitInfo);
   const p = parseFloat($("#fPrice").value);
   if (!(p > 0)) return $("#fPreview").textContent = "";
   $("#fPreview").textContent = currency === "USD"
@@ -491,6 +514,7 @@ async function openForm(it, isNew) {
   setCurrency(it.currency || "USD");
   $("#deleteBtn").classList.toggle("hidden", isNew);
   pendingPhoto = null; showFormPhoto(it.photo_url || null);
+  $("#unitRows").innerHTML = ""; (it.units || []).forEach(addUnitRow); loadUnitTypes();
   hide("#suggest");
   if (isNew) flash("New item — add the price · ទំនិញថ្មី សូមបញ្ចូលតម្លៃ", "warn");
   const s = await api("/api/summary");
@@ -537,6 +561,52 @@ async function suggestName(code) {
   $("#fName").focus();
 }
 const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+// ---------- selling types (រាយ / ដុំ / កញ្ជប់ / គេស) ----------
+let unitTypesLoaded = false;
+async function loadUnitTypes() {
+  if (unitTypesLoaded) return;
+  try {
+    const t = await api("/api/unit-types");
+    $("#unitTypes").innerHTML = t.map(u => `<option value="${esc(u.name)}">${esc(u.en)}</option>`).join("");
+    unitTypesLoaded = true;
+  } catch {}
+}
+function addUnitRow(u = {}) {
+  const d = document.createElement("div"); d.className = "unitrow";
+  d.innerHTML = `
+    <input class="u-name" list="unitTypes" maxlength="30" placeholder="Type e.g. គេស" value="${esc(u.unit || "")}">
+    <input class="u-qty" type="number" min="1" step="1" inputmode="numeric" placeholder="pcs" value="${u.qty ?? ""}">
+    <input class="u-price" type="number" min="0" step="any" inputmode="decimal" placeholder="price ${currency === "USD" ? "$" : "៛"}" value="${u.price ?? ""}">
+    <button type="button" class="x u-del" title="Remove">✕</button>
+    <input class="u-code" inputmode="numeric" maxlength="64" placeholder="Pack/case barcode (optional) · បាកូដគេស" value="${esc(u.barcode || "")}">
+    <div class="meta u-info"></div>`;
+  d.querySelector(".u-del").onclick = () => d.remove();
+  d.querySelectorAll("input").forEach(i => i.oninput = () => unitInfo(d));
+  $("#unitRows").appendChild(d); unitInfo(d);
+}
+function unitInfo(d) {
+  const q = parseInt(d.querySelector(".u-qty").value), pr = parseFloat(d.querySelector(".u-price").value);
+  const base = parseFloat($("#fPrice").value);
+  if (!(q > 0 && pr > 0)) return d.querySelector(".u-info").textContent = "Pieces in this type, and the price for the whole type.";
+  const per = pr / q, cheaper = base > 0 ? Math.round((1 - per / base) * 100) : null;
+  d.querySelector(".u-info").textContent = `= ${money(per, currency)} per piece` +
+    (cheaper !== null ? (cheaper > 0 ? ` (${cheaper}% cheaper than រាយ)` : cheaper < 0 ? ` (${-cheaper}% MORE than រាយ!)` : "") : "");
+}
+$("#unitAdd").onclick = () => { addUnitRow(); $("#unitRows .unitrow:last-child .u-name").focus(); };
+function collectUnits() {
+  const out = [];
+  document.querySelectorAll("#unitRows .unitrow").forEach(d => {
+    const unit = d.querySelector(".u-name").value.trim(), qty = parseInt(d.querySelector(".u-qty").value);
+    const price = parseFloat(d.querySelector(".u-price").value), barcode = d.querySelector(".u-code").value.trim();
+    if (!unit && !qty && !price && !barcode) return;              // empty row: ignore
+    if (!unit) throw new Error("Each selling type needs a name, e.g. គេស");
+    if (!(qty >= 1)) throw new Error(`How many pieces are in one ${unit}?`);
+    if (!(price > 0)) throw new Error(`Enter the price for one ${unit}`);
+    out.push({ unit, qty, price, barcode: barcode || null });
+  });
+  return out;
+}
+
 // ---------- product photo ----------
 // The phone shrinks the photo to max 480 px JPEG (~20-40 KB) before upload.
 let pendingPhoto = null;   // {blob} | {link} | {remove: true} | null (no change)
@@ -587,6 +657,7 @@ $("#form").onsubmit = async e => {
     category: $("#fCategory").value.trim(), price: num("#fPrice"), currency,
     cost: num("#fCost"), stock: num("#fStock"),
   };
+  try { body.units = collectUnits(); } catch (err) { return alert(err.message); }
   try {
     let it = await api("/api/items/" + encodeURIComponent(body.barcode), { method: "PUT", body: JSON.stringify(body) });
     try { it = (await applyPhoto(body.barcode)) || it; }
@@ -831,8 +902,9 @@ function sellMsg(html) { if (!html) return hide("#sellMsg"); $("#sellMsg").inner
 async function addToBasket(code) {
   code = String(code || "").trim(); if (!code) return;
   sellMsg("");
-  const line = basket.find(l => l.barcode === code);
-  if (line) { line.qty++; beep("found"); return renderBasket(code); }
+  // already in the basket? (item barcode = single piece; pack/case barcode = that type)
+  const line = basket.find(l => (l.barcode === code && !l.unit) || (l.unit && (l.unitCodes || {})[l.unit] === code));
+  if (line) { line.qty++; beep("found"); return renderBasket(line); }
   let it = null;
   try { it = await api("/api/items/" + encodeURIComponent(code)); }
   catch { return sellMsg("Cannot reach the database — try again. · មិនអាចភ្ជាប់"); }
@@ -843,17 +915,30 @@ async function addToBasket(code) {
       $("#sellNewItem").onclick = () => { document.querySelector('nav button[data-tab="scan"]').click(); lookup(code); };
   }
   beep("found");
-  basket.push({ barcode: it.barcode, name: it.name, price: it.price, currency: it.currency,
-                photo_url: it.photo_url || null, qty: 1 });
-  renderBasket(code);
+  const units = (it.units || []).map(u => ({ unit: u.unit, qty: u.qty, price: u.price }));
+  const unitCodes = Object.fromEntries((it.units || []).filter(u => u.barcode).map(u => [u.unit, u.barcode]));
+  const unit = it.scanned_unit || "";
+  const same = basket.find(l => l.barcode === it.barcode && (l.unit || "") === unit);
+  if (same) { same.qty++; return renderBasket(same); }
+  const u = units.find(x => x.unit === unit);
+  const added = { barcode: it.barcode, name: it.name, currency: it.currency, photo_url: it.photo_url || null,
+                  base_price: it.price, units, unitCodes, unit, pieces: u ? u.qty : 1,
+                  price: u ? u.price : it.price, qty: 1 };
+  basket.push(added);
+  renderBasket(added);
 }
 
-function renderBasket(flashCode) {
+function unitName(l) { return l.unit ? `${l.unit} (${l.pieces})` : "រាយ"; }
+function renderBasket(flashLine) {
   localStorage.setItem("scanprice.basket", JSON.stringify(basket));
   $("#basket").innerHTML = basket.map((l, i) => `
-    <tr${l.barcode === flashCode ? ' style="background:#ecfdf5"' : ""}>
+    <tr${l === flashLine ? ' style="background:#ecfdf5"' : ""}>
       <td><div class="namecell">${l.photo_url ? `<img class="thumb sm" alt="" src="${esc(l.photo_url)}">` : ""}
-        <div><b>${esc(l.name)}</b><div class="meta">${money(l.price, l.currency)} each</div></div></div></td>
+        <div><b>${esc(l.name)}</b><div class="meta">${money(l.price, l.currency)} / ${esc(unitName(l))}</div>
+        ${(l.units || []).length ? `<select class="unitsel" data-unit="${i}">
+            <option value="" ${!l.unit ? "selected" : ""}>រាយ (1)</option>
+            ${l.units.map(u => `<option value="${esc(u.unit)}" ${l.unit === u.unit ? "selected" : ""}>${esc(u.unit)} (${u.qty})</option>`).join("")}
+          </select>` : ""}</div></div></td>
       <td class="num"><span class="qty"><button data-i="${i}" data-d="-1">−</button><b>${l.qty}</b><button data-i="${i}" data-d="1">+</button></span></td>
       <td class="num">${money(l.price * l.qty, l.currency)}</td>
       <td><button class="x" data-del="${i}" title="Remove">✕</button></td>
@@ -866,6 +951,13 @@ function renderBasket(flashCode) {
   });
   document.querySelectorAll("#basket [data-del]").forEach(b => b.onclick = () => {
     basket.splice(b.dataset.del, 1); renderBasket();
+  });
+  document.querySelectorAll("#basket [data-unit]").forEach(sel => sel.onchange = () => {
+    const l = basket[sel.dataset.unit], u = l.units.find(x => x.unit === sel.value);
+    l.unit = u ? u.unit : ""; l.pieces = u ? u.qty : 1; l.price = u ? u.price : l.base_price;
+    const twin = basket.find(x => x !== l && x.barcode === l.barcode && (x.unit || "") === l.unit);
+    if (twin) { twin.qty += l.qty; basket.splice(basket.indexOf(l), 1); return renderBasket(twin); }
+    renderBasket(l);
   });
   const t = basketKhr();
   $("#totKhr").textContent = khr(roundKhr(t));
@@ -909,7 +1001,7 @@ $("#finishSale").onclick = async () => {
   if (!basket.length) return sellMsg("Basket is empty. · កន្ត្រកទទេ");
   const p = paidKhr();
   if (p && p + 1e-6 < roundKhr(basketKhr())) return alert("Customer has not paid enough yet. · ប្រាក់មិនគ្រប់");
-  const body = { items: basket.map(l => ({ barcode: l.barcode, qty: l.qty })),
+  const body = { items: basket.map(l => ({ barcode: l.barcode, qty: l.qty, unit: l.unit || "" })),
                  paid_usd: fieldNum("#payUsd"), paid_khr: fieldNum("#payKhr") };
   $("#finishSale").disabled = true;
   try {
@@ -930,7 +1022,7 @@ async function loadToday() {
     (d.profit_usd !== null ? ` · profit ${usd(d.profit_usd)}` : "");
   $("#todayList").innerHTML = d.list.slice(0, 20).map(s => `
     <tr><td>${new Date(s.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</td>
-      <td>${s.lines.map(l => `${esc(l.name)}${l.qty > 1 ? " ×" + l.qty : ""}`).join(", ")}</td>
+      <td>${s.lines.map(l => `${esc(l.name)}${l.unit ? " (" + esc(l.unit) + ")" : ""}${l.qty > 1 ? " ×" + l.qty : ""}`).join(", ")}</td>
       <td class="num">${khr(s.total_khr)}</td>
       <td><button class="x" data-cancel="${s.id}" title="Cancel sale">✕</button></td></tr>`).join("");
   document.querySelectorAll("#todayList [data-cancel]").forEach(b => b.onclick = async () => {
@@ -953,7 +1045,7 @@ async function loadList() {
   $("#list").innerHTML = items.map(i => `
     <tr class="click" data-code="${esc(i.barcode)}">
       <td><div class="namecell">${i.photo_url ? `<img class="thumb" loading="lazy" alt="" src="${esc(i.photo_url)}">` : ""}
-        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(catLabel(i.category)) : ""}</div></div></div></td>
+        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(catLabel(i.category)) : ""}${(i.units || []).length ? " · " + i.units.map(u => esc(u.unit)).join("/") : ""}</div></div></div></td>
       <td class="num">${usd(i.price_usd)}</td><td class="num">${khr(i.price_khr)}</td>
     </tr>`).join("");
   $("#listInfo").textContent = `${items.length} item(s)`;

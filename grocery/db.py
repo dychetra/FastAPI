@@ -137,6 +137,18 @@ def schema() -> list[str]:
             cost        {num}
         )""",
         "CREATE INDEX IF NOT EXISTS ix_sale_items_sale ON sale_items(sale_id)",
+        # extra ways to sell an item (pack, case, wholesale...): `qty` pieces for
+        # `price` in the item's currency; a pack/case may have its own barcode
+        f"""CREATE TABLE IF NOT EXISTS item_units (
+            id            {pk},
+            item_barcode  TEXT    NOT NULL,
+            unit          TEXT    NOT NULL,
+            qty           INTEGER NOT NULL,
+            price         {num}   NOT NULL,
+            unit_barcode  TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_item_units_item ON item_units(item_barcode)",
+        "CREATE INDEX IF NOT EXISTS ix_item_units_barcode ON item_units(unit_barcode)",
         # product photo: either our own small JPEG (data) or a link to an online
         # photo (url, e.g. Open Food Facts) which uses no space here
         f"""CREATE TABLE IF NOT EXISTS item_photos (
@@ -147,3 +159,21 @@ def schema() -> list[str]:
             updated_at  TEXT NOT NULL
         )""",
     ]
+
+
+# Columns added after the first release: (table, column, type)
+LATER_COLUMNS = [
+    ("sale_items", "unit", "TEXT"),       # selling type, '' = single piece
+    ("sale_items", "pieces", "INTEGER"),  # pieces per unit sold (case = 24)
+]
+
+
+def add_missing_columns(conn: "Conn") -> None:
+    """Upgrade an existing database in place (safe to run every start)."""
+    for table, col, typ in LATER_COLUMNS:
+        if conn.pg:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {typ}")
+        else:
+            cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")

@@ -9,6 +9,8 @@ the item is new, type its name and price once and it is saved.
 - Optional **cost** → shows **margin %**; optional **stock qty** → stock value
 - **🧾 Sell screen**: scan items into a basket (camera keeps scanning), total in $ and ៛,
   change in riel or dollars + riel, stock counts down, today's sales and profit
+- **Selling types** (រាយ / ដុំ / កញ្ជប់ / គេស …): each with pieces, its own price and optional
+  pack/case barcode; Sell screen switches type per line, stock counts pieces
 - **📷 Product photos**: online photo linked automatically, or take your own (shrunk on the
   phone to ~30 KB); thumbnails in Scan, Items and Sell
 - **Price history** for every item; **CSV export** that opens in Excel (Khmer text OK)

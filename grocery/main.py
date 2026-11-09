@@ -50,6 +50,7 @@ def init_db() -> None:
     with db() as conn:
         for stmt in database.schema():
             conn.execute(stmt)
+        database.add_missing_columns(conn)
         conn.execute(
             "INSERT INTO settings(key, value) VALUES ('khr_per_usd', ?) ON CONFLICT DO NOTHING",
             (str(DEFAULT_RATE),),
@@ -83,6 +84,31 @@ def to_both(price: float, currency: str, rate: float) -> tuple[float, int]:
 # --------------------------------------------------------------------------
 # Schemas
 # --------------------------------------------------------------------------
+class UnitIn(BaseModel):
+    """Another way to sell the item, e.g. កញ្ជប់ (pack) = 6 pieces for $4."""
+    unit: str = Field(min_length=1, max_length=30)
+    qty: int = Field(ge=1, le=100000, description="pieces in this unit")
+    price: float = Field(gt=0, description="price for the whole unit, item currency")
+    barcode: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("unit")
+    @classmethod
+    def tidy_unit(cls, v: str) -> str:
+        return " ".join(v.split())
+
+    @field_validator("barcode")
+    @classmethod
+    def tidy_barcode(cls, v: Optional[str]) -> Optional[str]:
+        v = (v or "").strip()
+        return v or None
+
+
+class UnitOut(UnitIn):
+    price_usd: float
+    price_khr: int
+    per_piece_usd: float
+
+
 class ItemIn(BaseModel):
     barcode: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=200)
@@ -90,7 +116,9 @@ class ItemIn(BaseModel):
     price: float = Field(gt=0, description="Selling price, in `currency`")
     currency: Currency = "USD"
     cost: Optional[float] = Field(default=None, ge=0, description="Buying cost, same currency")
-    stock: Optional[int] = Field(default=None, ge=0)
+    stock: Optional[int] = Field(default=None, ge=0, description="in single pieces")
+    # None = leave the selling types unchanged; [] = remove them all
+    units: Optional[list[UnitIn]] = Field(default=None, max_length=10)
 
     @field_validator("barcode", "name", "category")
     @classmethod
@@ -113,6 +141,8 @@ class ItemOut(ItemIn):
     margin_pct: Optional[float] = None
     updated_at: str
     photo_url: Optional[str] = None   # own photo (served here) or online photo link
+    units: list[UnitOut] = []         # type: ignore[assignment]
+    scanned_unit: Optional[str] = None  # set when a pack/case barcode was scanned
 
 
 class HistoryOut(BaseModel):
@@ -132,7 +162,27 @@ class Summary(BaseModel):
     categories: list[str]
 
 
-def to_out(row, rate: float) -> ItemOut:
+def load_units(conn, barcodes: Optional[list[str]] = None) -> dict[str, list]:
+    """Selling types per item barcode (all items if barcodes is None)."""
+    sql, args = "SELECT * FROM item_units", []
+    if barcodes is not None:
+        if not barcodes:
+            return {}
+        sql += f" WHERE item_barcode IN ({','.join('?' * len(barcodes))})"
+        args = barcodes
+    out: dict[str, list] = {}
+    for r in conn.execute(sql + " ORDER BY qty, id", args).fetchall():
+        out.setdefault(r["item_barcode"], []).append(r)
+    return out
+
+
+def unit_out(u, currency: str, rate: float) -> UnitOut:
+    usd, khr = to_both(u["price"], currency, rate)
+    return UnitOut(unit=u["unit"], qty=u["qty"], price=u["price"], barcode=u["unit_barcode"],
+                   price_usd=usd, price_khr=khr, per_piece_usd=round(usd / u["qty"], 3))
+
+
+def to_out(row, rate: float, units: Optional[list] = None, scanned_unit: Optional[str] = None) -> ItemOut:
     usd, khr = to_both(row["price"], row["currency"], rate)
     margin = None
     if row["cost"] is not None and row["price"] > 0:
@@ -151,6 +201,8 @@ def to_out(row, rate: float) -> ItemOut:
         margin_pct=margin,
         updated_at=row["updated_at"],
         photo_url=photo_url_of(row),
+        units=[unit_out(u, row["currency"], rate) for u in units or []],
+        scanned_unit=scanned_unit,
     )
 
 
@@ -171,7 +223,7 @@ def photo_url_of(row) -> Optional[str]:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.9.0"
+APP_VERSION = "2.0.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -276,16 +328,55 @@ def list_items(
     args.append(limit)
     with db() as conn:
         rate = get_rate(conn)
-        return [to_out(r, rate) for r in conn.execute(sql, args)]
+        rows = conn.execute(sql, args).fetchall()
+        units = load_units(conn, [r["barcode"] for r in rows])
+        return [to_out(r, rate, units.get(r["barcode"])) for r in rows]
 
 
 @app.get("/api/items/{barcode}", response_model=ItemOut)
 def get_item(barcode: str):
+    """Look up by the item barcode, or by the barcode of one of its packs/cases."""
+    barcode = barcode.strip()
     with db() as conn:
-        row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode.strip(),)).fetchone()
-        if not row:
-            raise HTTPException(404, "Item not found")
-        return to_out(row, get_rate(conn))
+        return item_out(conn, barcode)
+
+
+def item_out(conn, barcode: str) -> ItemOut:
+    scanned = None
+    row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode,)).fetchone()
+    if not row:
+        u = conn.execute("SELECT item_barcode, unit FROM item_units WHERE unit_barcode=?",
+                         (barcode,)).fetchone()
+        if u:
+            scanned = u["unit"]
+            row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?",
+                               (u["item_barcode"],)).fetchone()
+    if not row:
+        raise HTTPException(404, "Item not found")
+    units = load_units(conn, [row["barcode"]]).get(row["barcode"])
+    return to_out(row, get_rate(conn), units, scanned)
+
+
+def save_units(conn, barcode: str, units: list[UnitIn]) -> None:
+    names, codes = set(), set()
+    for u in units:
+        if u.unit.lower() in names:
+            raise HTTPException(400, f"Selling type '{u.unit}' is listed twice")
+        names.add(u.unit.lower())
+        if u.barcode:
+            if u.barcode == barcode or u.barcode in codes:
+                raise HTTPException(400, f"Barcode {u.barcode} is used twice")
+            clash = conn.execute(
+                "SELECT barcode AS b FROM items WHERE barcode=? UNION ALL "
+                "SELECT item_barcode AS b FROM item_units WHERE unit_barcode=? AND item_barcode<>?",
+                (u.barcode, u.barcode, barcode)).fetchone()
+            if clash:
+                raise HTTPException(400, f"Barcode {u.barcode} already belongs to item {clash['b']}")
+            codes.add(u.barcode)
+    conn.execute("DELETE FROM item_units WHERE item_barcode=?", (barcode,))
+    for u in units:
+        conn.execute("INSERT INTO item_units(item_barcode,unit,qty,price,unit_barcode)"
+                     " VALUES (?,?,?,?,?)", (barcode, u.unit, u.qty, u.price, u.barcode))
 
 
 @app.put("/api/items/{barcode}", response_model=ItemOut)
@@ -299,6 +390,9 @@ def save_item(barcode: str, item: ItemIn):
         raise HTTPException(400, "Barcode in URL and body must match")
     ts = now()
     with db() as conn:
+        if conn.execute("SELECT item_barcode FROM item_units WHERE unit_barcode=?",
+                        (barcode,)).fetchone():
+            raise HTTPException(400, f"Barcode {barcode} is a pack/case of another item")
         old = conn.execute("SELECT * FROM items WHERE barcode=?", (barcode,)).fetchone()
         if old is None:
             conn.execute(
@@ -321,8 +415,9 @@ def save_item(barcode: str, item: ItemIn):
                 "INSERT INTO price_history(barcode,price,currency,changed_at) VALUES (?,?,?,?)",
                 (barcode, item.price, item.currency, ts),
             )
-        row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode,)).fetchone()
-        return to_out(row, get_rate(conn))
+        if item.units is not None:
+            save_units(conn, barcode, item.units)
+        return item_out(conn, barcode)
 
 
 @app.delete("/api/items/{barcode}", status_code=204)
@@ -333,6 +428,7 @@ def delete_item(barcode: str):
             raise HTTPException(404, "Item not found")
         conn.execute("DELETE FROM price_history WHERE barcode=?", (barcode.strip(),))
         conn.execute("DELETE FROM item_photos WHERE barcode=?", (barcode.strip(),))
+        conn.execute("DELETE FROM item_units WHERE item_barcode=?", (barcode.strip(),))
 
 
 @app.get("/api/items/{barcode}/history", response_model=list[HistoryOut])
@@ -470,6 +566,21 @@ def save_categories(cats: list[Category]):
     return list_categories()
 
 
+DEFAULT_UNIT_TYPES = [("ដុំ", "Wholesale"), ("កញ្ជប់", "Pack"), ("គេស", "Case"),
+                      ("ឡូ", "Dozen"), ("ប្រអប់", "Box"), ("បាវ", "Sack")]
+
+
+@app.get("/api/unit-types")
+def unit_types():
+    """Suggested selling-type names: the usual ones plus any the shop has used."""
+    with db() as conn:
+        used = [r["unit"] for r in conn.execute(
+            "SELECT unit, COUNT(*) AS n FROM item_units GROUP BY unit ORDER BY n DESC").fetchall()]
+    out = [{"name": n, "en": e} for n, e in DEFAULT_UNIT_TYPES]
+    out += [{"name": u, "en": ""} for u in used if u not in {n for n, _ in DEFAULT_UNIT_TYPES}]
+    return out
+
+
 @app.get("/api/summary", response_model=Summary)
 def summary():
     with db() as conn:
@@ -490,15 +601,19 @@ def summary():
 def export_csv():
     with db() as conn:
         rate = get_rate(conn)
-        items = [to_out(r, rate) for r in conn.execute(ITEM_SELECT + " ORDER BY lower(items.name)")]
+        units = load_units(conn)
+        items = [to_out(r, rate, units.get(r["barcode"]))
+                 for r in conn.execute(ITEM_SELECT + " ORDER BY lower(items.name)").fetchall()]
     buf = io.StringIO()
     buf.write("﻿")  # BOM so Excel shows Khmer text correctly
     w = csv.writer(buf)
     w.writerow(["barcode", "name", "category", "price", "currency", "price_usd",
-                "price_khr", "cost", "margin_pct", "stock", "updated_at"])
+                "price_khr", "cost", "margin_pct", "stock", "selling_types", "updated_at"])
     for i in items:
+        types = "; ".join(f"{u.unit} x{u.qty} = {u.price} {i.currency}"
+                          + (f" [{u.barcode}]" if u.barcode else "") for u in i.units)
         w.writerow([i.barcode, i.name, i.category, i.price, i.currency, i.price_usd,
-                    i.price_khr, i.cost, i.margin_pct, i.stock, i.updated_at])
+                    i.price_khr, i.cost, i.margin_pct, i.stock, types, i.updated_at])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),
@@ -531,7 +646,8 @@ class Backup(BaseModel):
 
 SALE_COLS = ["id", "created_at", "day", "rate", "items_count", "total_khr", "total_usd",
              "cost_khr", "paid_usd", "paid_khr", "change_khr"]
-SALE_ITEM_COLS = ["sale_id", "barcode", "name", "qty", "price", "currency", "line_khr", "cost"]
+SALE_ITEM_COLS = ["sale_id", "barcode", "name", "qty", "price", "currency", "line_khr", "cost",
+                  "unit", "pieces"]
 
 
 @app.get("/api/backup", response_model=Backup)
@@ -539,6 +655,7 @@ def backup():
     """Everything in one JSON document: items, price history and the rate."""
     with db() as conn:
         items = conn.execute("SELECT * FROM items ORDER BY barcode").fetchall()
+        all_units = load_units(conn)
         hist = conn.execute(
             "SELECT barcode,price,currency,changed_at FROM price_history ORDER BY id"
         ).fetchall()
@@ -547,7 +664,11 @@ def backup():
             khr_per_usd=get_rate(conn),
             shop_name=get_shop_name(conn),
             categories=[c.model_dump() for c in get_categories(conn)],
-            items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields}) for r in items],
+            items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields if k != "units"},
+                          units=[UnitIn(unit=u["unit"], qty=u["qty"], price=u["price"],
+                                        barcode=u["unit_barcode"])
+                                 for u in all_units.get(r["barcode"], [])])
+                   for r in items],
             history=[HistoryRow(**dict(r)) for r in hist],
             updated_at={r["barcode"]: r["updated_at"] for r in items},
             sales=[{k: r[k] for k in SALE_COLS}
@@ -565,6 +686,7 @@ def restore(data: Backup, confirm: bool = False):
     ts = now()
     with db() as conn:  # one transaction: all or nothing
         conn.execute("DELETE FROM price_history")
+        conn.execute("DELETE FROM item_units")
         conn.execute("DELETE FROM items")
         for i in data.items:
             conn.execute(
@@ -573,6 +695,9 @@ def restore(data: Backup, confirm: bool = False):
                 (i.barcode, i.name, i.category, i.price, i.currency, i.cost, i.stock,
                  data.updated_at.get(i.barcode, ts)),
             )
+        for i in data.items:
+            if i.units:
+                save_units(conn, i.barcode, i.units)
         for h in data.history:
             conn.execute(
                 "INSERT INTO price_history(barcode,price,currency,changed_at) VALUES (?,?,?,?)",
@@ -775,8 +900,9 @@ def khr_exact(price: float, currency: str, rate: float) -> float:
 
 
 class SaleLineIn(BaseModel):
-    barcode: str = Field(min_length=1, max_length=64)
+    barcode: str = Field(min_length=1, max_length=64)  # item, or its pack/case barcode
     qty: int = Field(ge=1, le=9999)
+    unit: str = Field(default="", max_length=30)        # '' = single piece (រាយ)
 
 
 class SaleIn(BaseModel):
@@ -792,6 +918,8 @@ class SaleLineOut(BaseModel):
     price: float
     currency: Currency
     line_khr: int
+    unit: str = ""        # '' = single piece
+    pieces: int = 1       # pieces per unit
 
 
 class SaleOut(BaseModel):
@@ -839,32 +967,55 @@ def sale_out(row, lines=None) -> SaleOut:
         change_usd_part=dollars, change_khr_part=riel,
         lines=[SaleLineOut(barcode=l["barcode"], name=l["name"], qty=l["qty"],
                            price=l["price"], currency=l["currency"],
-                           line_khr=round_khr(l["line_khr"])) for l in (lines or [])],
+                           line_khr=round_khr(l["line_khr"]), unit=_col(l, "unit") or "",
+                           pieces=_col(l, "pieces") or 1) for l in (lines or [])],
     )
 
 
 @app.post("/api/sales", response_model=SaleOut, status_code=201)
 def create_sale(sale: SaleIn):
     """Record a finished sale. Prices come from the database, not the phone."""
-    qty_by_code: dict[str, int] = {}
-    for line in sale.items:  # same barcode twice -> add up
-        code = line.barcode.strip()
-        qty_by_code[code] = qty_by_code.get(code, 0) + line.qty
     ts = datetime.now(timezone.utc)
     with db() as conn:
         rate = get_rate(conn)
-        lines, total, cost_total, cost_known = [], 0.0, 0.0, True
-        for code, qty in qty_by_code.items():
+        # resolve each line to (item, unit name, pieces per unit, unit price); a
+        # pack/case barcode means that unit. Same item + unit twice -> add up.
+        merged: dict[tuple[str, str], list] = {}
+        for line in sale.items:
+            code, unit = line.barcode.strip(), line.unit.strip()
             it = conn.execute("SELECT * FROM items WHERE barcode=?", (code,)).fetchone()
             if it is None:
-                raise HTTPException(400, f"Unknown barcode {code}: add the item first")
-            line_khr = khr_exact(it["price"], it["currency"], rate) * qty
+                u = conn.execute("SELECT * FROM item_units WHERE unit_barcode=?", (code,)).fetchone()
+                if u is None:
+                    raise HTTPException(400, f"Unknown barcode {code}: add the item first")
+                it = conn.execute("SELECT * FROM items WHERE barcode=?",
+                                  (u["item_barcode"],)).fetchone()
+                unit = unit or u["unit"]
+            if unit:
+                u = conn.execute("SELECT * FROM item_units WHERE item_barcode=? AND unit=?",
+                                 (it["barcode"], unit)).fetchone()
+                if u is None:
+                    raise HTTPException(400, f"{it['name']} has no selling type '{unit}'")
+                pieces, price = u["qty"], u["price"]
+            else:
+                pieces, price = 1, it["price"]
+            key = (it["barcode"], unit)
+            if key in merged:
+                merged[key][4] += line.qty
+            else:
+                merged[key] = [it, unit, pieces, price, line.qty]
+        lines, total, cost_total, cost_known = [], 0.0, 0.0, True
+        pieces_sold: dict[str, int] = {}
+        for it, unit, pieces, price, qty in merged.values():
+            line_khr = khr_exact(price, it["currency"], rate) * qty
             total += line_khr
-            if it["cost"] is None:
+            line_cost = None if it["cost"] is None else it["cost"] * pieces   # cost is per piece
+            if line_cost is None:
                 cost_known = False
             else:
-                cost_total += khr_exact(it["cost"], it["currency"], rate) * qty
-            lines.append((it, qty, line_khr))
+                cost_total += khr_exact(line_cost, it["currency"], rate) * qty
+            pieces_sold[it["barcode"]] = pieces_sold.get(it["barcode"], 0) + qty * pieces
+            lines.append((it, unit, pieces, price, qty, line_khr, line_cost))
         paid = sale.paid_usd * rate + sale.paid_khr
         if paid and paid + 1e-6 < round_khr(total):
             raise HTTPException(400, "Customer paid less than the total")
@@ -873,19 +1024,22 @@ def create_sale(sale: SaleIn):
             "INSERT INTO sales(created_at,day,rate,items_count,total_khr,total_usd,cost_khr,"
             "paid_usd,paid_khr,change_khr) VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING id",
             (ts.isoformat(timespec="seconds"), local_day(ts), rate,
-             sum(qty_by_code.values()), total, round(total / rate, 2),
+             sum(l[4] for l in lines), total, round(total / rate, 2),
              cost_total if cost_known else None, sale.paid_usd, sale.paid_khr, change),
         ).fetchone()["id"]
-        for it, qty, line_khr in lines:
+        stock_of = {}
+        for it, unit, pieces, price, qty, line_khr, line_cost in lines:
             conn.execute(
-                "INSERT INTO sale_items(sale_id,barcode,name,qty,price,currency,line_khr,cost)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (sale_id, it["barcode"], it["name"], qty, it["price"], it["currency"],
-                 line_khr, it["cost"]),
+                "INSERT INTO sale_items(sale_id,barcode,name,qty,price,currency,line_khr,cost,"
+                "unit,pieces) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sale_id, it["barcode"], it["name"], qty, price, it["currency"],
+                 line_khr, line_cost, unit, pieces),
             )
-            if it["stock"] is not None:  # count down stock, never below zero
+            stock_of[it["barcode"]] = it["stock"]
+        for code, sold in pieces_sold.items():  # count down stock in pieces, never below 0
+            if stock_of[code] is not None:
                 conn.execute("UPDATE items SET stock=? WHERE barcode=?",
-                             (max(0, it["stock"] - qty), it["barcode"]))
+                             (max(0, stock_of[code] - sold), code))
         row = conn.execute("SELECT * FROM sales WHERE id=?", (sale_id,)).fetchone()
         sl = conn.execute("SELECT * FROM sale_items WHERE sale_id=? ORDER BY id", (sale_id,)).fetchall()
         return sale_out(row, sl)
@@ -918,10 +1072,10 @@ def cancel_sale(sale_id: int):
     with db() as conn:
         if not conn.execute("SELECT id FROM sales WHERE id=?", (sale_id,)).fetchone():
             raise HTTPException(404, "Sale not found")
-        for l in conn.execute("SELECT barcode,qty FROM sale_items WHERE sale_id=?",
+        for l in conn.execute("SELECT barcode,qty,pieces FROM sale_items WHERE sale_id=?",
                               (sale_id,)).fetchall():
             conn.execute("UPDATE items SET stock=stock+? WHERE barcode=? AND stock IS NOT NULL",
-                         (l["qty"], l["barcode"]))
+                         (l["qty"] * (l["pieces"] or 1), l["barcode"]))
         conn.execute("DELETE FROM sale_items WHERE sale_id=?", (sale_id,))
         conn.execute("DELETE FROM sales WHERE id=?", (sale_id,))
 
