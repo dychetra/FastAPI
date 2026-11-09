@@ -82,7 +82,15 @@ export APP_PASSWORD="your-password"
 uvicorn main:app --port 8000
 ```
 
-## Daily backup to Google Drive
+## Daily backup to Google Drive — in the cloud, no PC needed (recommended)
+
+[`grocery/google-drive-backup.gs`](grocery/google-drive-backup.gs) is a Google Apps Script that
+runs every evening inside your Google account and saves the backup, the price list and all
+product photos to **My Drive / ScanPrice backups**. Setup instructions are at the top of the file:
+paste it into a new project at https://script.google.com, add the script property
+`APP_PASSWORD`, run `dailyBackup` once, then run `installDailyTrigger` once.
+
+## Daily backup with a PC (Google Drive or OneDrive folder)
 
 1. Install **Google Drive for desktop** on the shop PC and sign in. Your Drive shows up
    as a drive, e.g. `G:\My Drive`. Create a folder `Grocery backups` in it.
