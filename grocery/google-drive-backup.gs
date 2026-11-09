@@ -27,6 +27,8 @@ const RUN_AT_HOUR = 21;                 // 9 pm Cambodia time
 const TIME_BUDGET_MS = 4.5 * 60 * 1000; // Apps Script stops at 6 min; the rest waits for tomorrow
 
 function dailyBackup() {
+  // Google lets people untick single permissions; this asks again for any that are missing.
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   wakeApp_();
   const root = folder_(DriveApp.getRootFolder(), FOLDER_NAME);
   const day = Utilities.formatDate(new Date(), TIME_ZONE, 'yyyy-MM-dd');
