@@ -202,7 +202,8 @@ def test_category_rules():
     beer = {"categories_tags": ["en:beverages", "en:alcoholic-beverages", "en:beers"]}
     assert main.guess_category(beer, "Open Food Facts") == "Beer & Alcohol"
     assert main.guess_category({"categories_tags": ["en:instant-noodles"]}, "x") == "Noodles"
-    assert main.guess_category({}, "Open Products Facts") == "Household"
+    assert main.guess_category({}, "Open Products Facts") == "Household & Cleaning"
+    assert main.guess_category({"categories_tags": ["en:instant-coffees"]}, "x") == "Coffee & Tea"
 
 
 def test_lookup_network_error_is_not_cached(client, monkeypatch):
@@ -381,3 +382,27 @@ def test_shop_name_default_update_and_backup(client):
     client.put("/api/settings/shop", json={"shop_name": "Other"})
     client.post("/api/restore?confirm=true", json=snap)
     assert client.get("/api/settings/shop").json()["shop_name"] == "Gech Heng Wing Shop 2"
+
+
+def test_categories_default_counts_add_remove_reset(client):
+    cats = client.get("/api/categories").json()
+    names = [c["name"] for c in cats]
+    assert "Drinks" in names and "Phone cards" in names and len(names) >= 20
+    assert next(c for c in cats if c["name"] == "Rice")["km"] == "អង្ករ"
+    client.put("/api/items/1", json=item(barcode="1", category="Drinks"))
+    client.put("/api/items/2", json=item(barcode="2", category="Drinks"))
+    client.put("/api/items/3", json=item(barcode="3", category="Lottery"))   # not in the list
+    cats = client.get("/api/categories").json()
+    assert next(c for c in cats if c["name"] == "Drinks")["count"] == 2
+    assert cats[-1] == {"name": "Lottery", "km": "", "count": 1}             # unlisted, still shown
+    # replace list: keep two, add one (duplicates ignored)
+    r = client.put("/api/categories", json=[{"name": "Drinks", "km": "ភេសជ្ជៈ"},
+                                           {"name": " Ice  cream ", "km": "ការ៉េម"},
+                                           {"name": "drinks"}])
+    assert [c["name"] for c in r.json()] == ["Drinks", "Ice cream", "Lottery"]
+    snap = client.get("/api/backup").json()
+    assert [c["name"] for c in snap["categories"]] == ["Drinks", "Ice cream"]
+    client.put("/api/categories", json=[])                                     # back to defaults
+    assert len(client.get("/api/categories").json()) >= 21
+    client.post("/api/restore?confirm=true", json=snap)
+    assert [c["name"] for c in client.get("/api/categories").json()][:2] == ["Drinks", "Ice cream"]

@@ -73,6 +73,11 @@
   .thumb.big { width:96px; height:96px; }
   .thumb.sm { width:34px; height:34px; }
   .namecell { display:flex; gap:8px; align-items:center; }
+  #catChips { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  .catchip { display:inline-flex; align-items:center; gap:4px; padding:6px 6px 6px 10px; border:1px solid var(--line);
+             border-radius:16px; background:#fff; font-size:14px; }
+  .catchip small { color:var(--muted); white-space:nowrap; }
+  .catchip .x { padding:0 4px; }
   .x { border:0; background:none; color:var(--bad); font-size:16px; cursor:pointer; }
 </style>
 </head>
@@ -155,8 +160,7 @@
       <label>Name · ឈ្មោះ</label>
       <input id="fName" required maxlength="200">
       <label>Category · ប្រភេទ</label>
-      <input id="fCategory" list="cats" maxlength="100" placeholder="Drinks, Rice, Snacks…">
-      <datalist id="cats"></datalist>
+      <select id="fCategory"></select>
       <label>Currency · រូបិយប័ណ្ណ</label>
       <div class="seg" id="fCurrency">
         <button type="button" data-cur="USD" class="on">$ USD</button>
@@ -268,6 +272,19 @@
       </div>
     </div>
     <div class="card">
+      <label>Categories · ប្រភេទទំនិញ</label>
+      <div id="catChips"></div>
+      <div class="row" style="margin-top:10px">
+        <input id="catNew" maxlength="100" placeholder="New category (English)">
+        <input id="catNewKm" maxlength="100" placeholder="ខ្មែរ (optional)">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="catAdd">➕ Add category · បន្ថែម</button>
+        <button class="btn" id="catReset" style="flex:0 0 auto">↺ Default list</button>
+      </div>
+      <div class="meta" style="margin-top:6px">✕ removes a category from the list; items keep it until you change them.</div>
+    </div>
+    <div class="card">
       <label>Exchange rate · អត្រាប្តូរប្រាក់ (KHR per 1 USD)</label>
       <div class="row">
         <input id="rate" type="number" step="1" min="1">
@@ -315,11 +332,62 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   stopCamera();
   ["scan", "sell", "items", "settings"].forEach(t => $("#tab-" + t).classList.toggle("hidden", t !== b.dataset.tab));
   if (b.dataset.tab === "items") loadList();
-  if (b.dataset.tab === "settings") loadSummary();
+  if (b.dataset.tab === "settings") { loadSummary(); loadCategories().then(renderCategoryChips); }
   if (b.dataset.tab === "sell") { renderBasket(); loadToday(); }
 });
 
 // ---------- rate ----------
+// ---------- categories ----------
+let CATS = [];
+const catLabel = name => { const c = CATS.find(x => x.name === name); return c && c.km ? `${name} · ${c.km}` : name; };
+async function loadCategories() {
+  try { CATS = await api("/api/categories"); } catch {}
+  return CATS;
+}
+function fillCategorySelect(selected) {
+  const names = CATS.map(c => c.name);
+  if (selected && !names.includes(selected)) CATS.push({ name: selected, km: "", count: 0 });
+  $("#fCategory").innerHTML = `<option value="">— Choose category · ជ្រើសរើសប្រភេទ —</option>` +
+    CATS.map(c => `<option value="${esc(c.name)}">${esc(catLabel(c.name))}</option>`).join("") +
+    `<option value="__new__">➕ New category… · ប្រភេទថ្មី</option>`;
+  $("#fCategory").value = selected || "";
+}
+function setCategory(name) { fillCategorySelect(name); }
+$("#fCategory").onchange = async e => {
+  if (e.target.value !== "__new__") return;
+  const name = (prompt("New category name (English):") || "").trim();
+  if (!name) return setCategory("");
+  const km = (prompt("Khmer name (optional) · ឈ្មោះខ្មែរ:") || "").trim();
+  await saveCategoryList([...CATS.map(({ name, km }) => ({ name, km })), { name, km }]);
+  setCategory(name);
+};
+async function saveCategoryList(list) {
+  CATS = await api("/api/categories", { method: "PUT", body: JSON.stringify(list) });
+  renderCategoryChips();
+}
+function renderCategoryChips() {
+  // listed categories (from Settings) first; items may also use unlisted ones
+  $("#catChips").innerHTML = CATS.map((c, i) => `
+    <span class="catchip">${esc(c.name)}${c.km ? ` <small>${esc(c.km)}</small>` : ""}
+      <small>(${c.count})</small><button class="x" data-cat="${i}" title="Remove">✕</button></span>`).join("");
+  document.querySelectorAll("#catChips [data-cat]").forEach(b => b.onclick = async () => {
+    const c = CATS[b.dataset.cat];
+    if (c.count && !confirm(`${c.count} item(s) use "${c.name}". Remove it from the list anyway?`)) return;
+    await saveCategoryList(CATS.filter((_, i) => i !== Number(b.dataset.cat)).map(({ name, km }) => ({ name, km })));
+  });
+}
+$("#catAdd").onclick = async () => {
+  const name = $("#catNew").value.trim(), km = $("#catNewKm").value.trim();
+  if (!name) return alert("Type the category name");
+  await saveCategoryList([...CATS.map(({ name, km }) => ({ name, km })), { name, km }]);
+  $("#catNew").value = ""; $("#catNewKm").value = ""; flash("Category added ✔");
+};
+$("#catReset").onclick = async () => {
+  if (!confirm("Go back to the default grocery category list? Items keep their categories.")) return;
+  await api("/api/categories", { method: "PUT", body: "[]" });   // empty = defaults below
+  await loadCategories(); renderCategoryChips();
+};
+
 // ---------- shop name ----------
 function showShopName(name) {
   $("#shopName").textContent = name; $("#shopInput").value = name;
@@ -416,7 +484,7 @@ async function openForm(it, isNew) {
   $("#fBarcode").value = it.barcode || "";
   $("#fBarcode").readOnly = !isNew;
   $("#fName").value = it.name || "";
-  $("#fCategory").value = it.category || "";
+  await loadCategories(); setCategory(it.category || "");
   $("#fPrice").value = it.price ?? "";
   $("#fCost").value = it.cost ?? "";
   $("#fStock").value = it.stock ?? "";
@@ -426,7 +494,6 @@ async function openForm(it, isNew) {
   hide("#suggest");
   if (isNew) flash("New item — add the price · ទំនិញថ្មី សូមបញ្ចូលតម្លៃ", "warn");
   const s = await api("/api/summary");
-  $("#cats").innerHTML = s.categories.map(c => `<option value="${esc(c)}">`).join("");
   show("#form");
   (isNew ? $("#fName") : $("#fPrice")).focus();
   if (isNew && it.barcode) suggestName(it.barcode);
@@ -444,7 +511,7 @@ async function suggestName(code) {
   if ($("#fBarcode").value.trim() !== code || $("#form").classList.contains("hidden")) return;
   if (r && r.found) {
     if (!$("#fName").value.trim()) $("#fName").value = r.name;
-    if (!$("#fCategory").value.trim() && r.category) $("#fCategory").value = r.category;
+    if (!$("#fCategory").value && r.category) setCategory(r.category);
     $("#suggestText").innerHTML = `Found: <b>${esc(r.name)}</b><br><span class="meta">from ${esc(r.source)} — check the name, then enter the price</span>`;
     if (r.image_url) {
       $("#suggestImg").src = r.image_url; show("#suggestImg");
@@ -462,7 +529,7 @@ async function suggestName(code) {
     : "Name not in the free online list — please type it. · រកឈ្មោះមិនឃើញ សូមវាយបញ្ចូល";
   if (r && r.similar) {
     html += `<br><span class="meta">Same company as <b>${esc(r.similar.name)}</b> in your shop</span>`;
-    if (!$("#fCategory").value.trim() && r.similar.category) $("#fCategory").value = r.similar.category;
+    if (!$("#fCategory").value && r.similar.category) setCategory(r.similar.category);
   }
   $("#suggestText").innerHTML = html;
   $("#retryBtn").classList.toggle("hidden", !(!r || r.error));
@@ -880,12 +947,13 @@ async function loadList() {
   const q = new URLSearchParams({ q: $("#search").value, category: $("#catFilter").value });
   const [items, s] = await Promise.all([api("/api/items?" + q), api("/api/summary")]);
   const sel = $("#catFilter").value;
-  $("#catFilter").innerHTML = `<option value="">All categories</option>` +
-    s.categories.map(c => `<option ${c === sel ? "selected" : ""}>${esc(c)}</option>`).join("");
+  await loadCategories();
+  $("#catFilter").innerHTML = `<option value="">All categories · ទាំងអស់</option>` +
+    CATS.filter(c => c.count > 0).map(c => `<option value="${esc(c.name)}" ${c.name === sel ? "selected" : ""}>${esc(catLabel(c.name))} (${c.count})</option>`).join("");
   $("#list").innerHTML = items.map(i => `
     <tr class="click" data-code="${esc(i.barcode)}">
       <td><div class="namecell">${i.photo_url ? `<img class="thumb" loading="lazy" alt="" src="${esc(i.photo_url)}">` : ""}
-        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(i.category) : ""}</div></div></div></td>
+        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(catLabel(i.category)) : ""}</div></div></div></td>
       <td class="num">${usd(i.price_usd)}</td><td class="num">${khr(i.price_khr)}</td>
     </tr>`).join("");
   $("#listInfo").textContent = `${items.length} item(s)`;

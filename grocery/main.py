@@ -18,6 +18,7 @@ import base64
 import re
 import csv
 import io
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -170,7 +171,7 @@ def photo_url_of(row) -> Optional[str]:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -400,6 +401,75 @@ def update_shop(body: ShopIn):
     return body
 
 
+# --------------------------------------------------------------------------
+# Categories (English name is stored on the item; Khmer is shown beside it)
+# --------------------------------------------------------------------------
+DEFAULT_CATEGORIES = [
+    ("Drinks", "ភេសជ្ជៈ"), ("Water", "ទឹកសុទ្ធ"), ("Beer & Alcohol", "ស្រា បៀរ"),
+    ("Coffee & Tea", "កាហ្វេ និង តែ"), ("Snacks", "នំចំណី"), ("Noodles", "មី"),
+    ("Rice", "អង្ករ"), ("Cooking & Spices", "គ្រឿងទេស"), ("Canned food", "ម្ហូបកំប៉ុង"),
+    ("Milk & Dairy", "ទឹកដោះគោ"), ("Bread & Bakery", "នំបុ័ង"), ("Frozen food", "អាហារកក"),
+    ("Fruits & Vegetables", "ផ្លែឈើ និង បន្លែ"), ("Meat, Fish & Eggs", "សាច់ ត្រី ពង"),
+    ("Personal care", "អនាម័យខ្លួន"), ("Household & Cleaning", "សម្ភារៈផ្ទះ"),
+    ("Baby care", "ទារក"), ("Cigarettes", "បារី"), ("Phone cards", "កាតទូរស័ព្ទ"),
+    ("Ice", "ទឹកកក"), ("Other", "ផ្សេងៗ"),
+]
+
+
+class Category(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    km: str = Field(default="", max_length=100)
+
+    @field_validator("name", "km")
+    @classmethod
+    def tidy(cls, v: str) -> str:
+        return " ".join(v.split())
+
+
+class CategoryOut(Category):
+    count: int = 0         # how many items use it
+
+
+def get_categories(conn) -> list[Category]:
+    row = conn.execute("SELECT value FROM settings WHERE key='categories'").fetchone()
+    if row:
+        try:
+            return [Category(**c) for c in json.loads(row["value"])]
+        except (ValueError, TypeError):
+            pass
+    return [Category(name=n, km=k) for n, k in DEFAULT_CATEGORIES]
+
+
+@app.get("/api/categories", response_model=list[CategoryOut])
+def list_categories():
+    """The shop's category list, plus any other category still used by items."""
+    with db() as conn:
+        cats = get_categories(conn)
+        counts = {r["category"]: r["n"] for r in conn.execute(
+            "SELECT category, COUNT(*) AS n FROM items WHERE category <> '' GROUP BY category")}
+    out = [CategoryOut(name=c.name, km=c.km, count=counts.pop(c.name, 0)) for c in cats]
+    out += [CategoryOut(name=n, count=c) for n, c in sorted(counts.items(), key=lambda x: x[0].lower())]
+    return out
+
+
+@app.put("/api/categories", response_model=list[CategoryOut])
+def save_categories(cats: list[Category]):
+    """Replace the category list (add / remove / reorder). Items keep their category."""
+    seen, clean = set(), []
+    for c in cats:
+        if c.name and c.name.lower() not in seen:
+            seen.add(c.name.lower())
+            clean.append(c.model_dump())
+    if len(clean) > 200:
+        raise HTTPException(400, "Too many categories")
+    with db() as conn:
+        if clean:
+            set_setting(conn, "categories", json.dumps(clean, ensure_ascii=False))
+        else:  # empty list = back to the default grocery list
+            conn.execute("DELETE FROM settings WHERE key='categories'")
+    return list_categories()
+
+
 @app.get("/api/summary", response_model=Summary)
 def summary():
     with db() as conn:
@@ -450,6 +520,7 @@ class Backup(BaseModel):
     created_at: str
     khr_per_usd: float
     shop_name: Optional[str] = None   # added in v1.8
+    categories: Optional[list[dict]] = None  # added in v1.9
     items: list[ItemIn]
     history: list[HistoryRow]
     updated_at: dict[str, str] = {}
@@ -475,6 +546,7 @@ def backup():
             created_at=now(),
             khr_per_usd=get_rate(conn),
             shop_name=get_shop_name(conn),
+            categories=[c.model_dump() for c in get_categories(conn)],
             items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields}) for r in items],
             history=[HistoryRow(**dict(r)) for r in hist],
             updated_at={r["barcode"]: r["updated_at"] for r in items},
@@ -513,6 +585,8 @@ def restore(data: Backup, confirm: bool = False):
         )
         if data.shop_name:
             set_setting(conn, "shop_name", data.shop_name)
+        if data.categories is not None:
+            set_setting(conn, "categories", json.dumps(data.categories, ensure_ascii=False))
         if data.sales is not None:
             conn.execute("DELETE FROM sale_items")
             conn.execute("DELETE FROM sales")
@@ -551,15 +625,21 @@ _lookup_cache: dict[str, dict] = {}
 CATEGORY_RULES = [
     ("Beer & Alcohol", ("alcoholic-beverages", "beers", "wines", "spirits")),
     ("Water", ("waters",)),
-    ("Drinks", ("beverages", "drinks", "juices", "sodas", "teas", "coffees")),
+    ("Coffee & Tea", ("coffees", "teas", "instant-coffees", "coffee-drinks")),
+    ("Drinks", ("beverages", "drinks", "juices", "sodas")),
     ("Noodles", ("noodles", "instant-noodles")),
     ("Rice", ("rices",)),
     ("Milk & Dairy", ("dairies", "milks", "yogurts", "cheeses")),
+    ("Baby care", ("baby-foods", "baby-milks")),
+    ("Bread & Bakery", ("breads", "cakes", "pastries")),
+    ("Frozen food", ("frozen-foods",)),
     ("Snacks", ("snacks", "chips", "crisps", "biscuits", "cookies", "candies",
                 "confectioneries", "chocolates", "crackers")),
-    ("Cooking", ("sauces", "condiments", "fish-sauces", "seasonings", "oils",
-                 "vinegars", "sugars", "salts", "spices")),
+    ("Cooking & Spices", ("sauces", "condiments", "fish-sauces", "seasonings", "oils",
+                          "vinegars", "sugars", "salts", "spices", "flours")),
     ("Canned food", ("canned-foods",)),
+    ("Fruits & Vegetables", ("fruits", "vegetables", "fresh-foods")),
+    ("Meat, Fish & Eggs", ("meats", "fishes", "seafood", "eggs")),
 ]
 
 
@@ -586,7 +666,7 @@ def guess_category(p: dict, source: str) -> str:
     if source == "Open Beauty Facts":
         return "Personal care"
     if source == "Open Products Facts":
-        return "Household"
+        return "Household & Cleaning"
     return ""
 
 
