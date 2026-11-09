@@ -9,6 +9,9 @@
  *
  * Setup (once), signed in to Google as the account that should own the backups:
  *   1. script.google.com -> New project -> paste this file -> Save.
+ *   1b. Project Settings -> tick 'Show "appsscript.json" manifest file' -> in the editor
+ *       replace appsscript.json with grocery/appsscript.json from this repository
+ *       (lists the 3 permissions so Google asks for all of them at once).
  *   2. Project Settings (gear) -> Script properties -> Add:
  *        APP_PASSWORD = the ScanPrice shop password
  *   3. Select "dailyBackup" -> Run -> allow access. Check the Drive folder.
