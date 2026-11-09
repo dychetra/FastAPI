@@ -57,12 +57,20 @@ function password_() {
   return p;
 }
 
+// A missing Google permission will not fix itself: stop at once with a clear message.
+function rethrowIfPermission_(e) {
+  if (/permission|authori[sz]/i.test(String(e))) {
+    throw new Error('Google permission missing. Click Run again, then "Review permissions" and tick ' +
+                    'ALL boxes (Google Drive + Connect to an external service). Details: ' + e);
+  }
+}
+
 // The free Render server sleeps when unused; the first request wakes it (30-60 s).
 function wakeApp_() {
   for (let i = 0; i < 4; i++) {
     try {
       if (UrlFetchApp.fetch(APP_URL + '/healthz', { muteHttpExceptions: true }).getResponseCode() === 200) return;
-    } catch (e) { /* still waking up */ }
+    } catch (e) { rethrowIfPermission_(e); /* else still waking up */ }
     Utilities.sleep(15000);
   }
 }
@@ -74,7 +82,7 @@ function fetchApp_(path) {
     let r;
     try {
       r = UrlFetchApp.fetch(APP_URL + path, { headers: headers, muteHttpExceptions: true });
-    } catch (e) { last = String(e); Utilities.sleep(15000); continue; }
+    } catch (e) { rethrowIfPermission_(e); last = String(e); Utilities.sleep(15000); continue; }
     const code = r.getResponseCode();
     if (code === 200) return r;
     if (code === 401) throw new Error('ScanPrice refused the password: check APP_PASSWORD in Script properties');
