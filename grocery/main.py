@@ -170,7 +170,7 @@ def photo_url_of(row) -> Optional[str]:
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -362,6 +362,44 @@ def update_rate(body: RateIn):
     return body
 
 
+DEFAULT_SHOP_NAME = "Gech Heng Wing Shop"
+
+
+def get_shop_name(conn) -> str:
+    row = conn.execute("SELECT value FROM settings WHERE key='shop_name'").fetchone()
+    return row["value"] if row else DEFAULT_SHOP_NAME
+
+
+def set_setting(conn, key: str, value: str) -> None:
+    conn.execute("INSERT INTO settings(key,value) VALUES (?,?)"
+                 " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+class ShopIn(BaseModel):
+    shop_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("shop_name")
+    @classmethod
+    def strip(cls, v: str) -> str:
+        v = " ".join(v.split())
+        if not v:
+            raise ValueError("Shop name cannot be empty")
+        return v
+
+
+@app.get("/api/settings/shop", response_model=ShopIn)
+def read_shop():
+    with db() as conn:
+        return ShopIn(shop_name=get_shop_name(conn))
+
+
+@app.put("/api/settings/shop", response_model=ShopIn)
+def update_shop(body: ShopIn):
+    with db() as conn:
+        set_setting(conn, "shop_name", body.shop_name)
+    return body
+
+
 @app.get("/api/summary", response_model=Summary)
 def summary():
     with db() as conn:
@@ -411,6 +449,7 @@ class Backup(BaseModel):
     version: int = 1
     created_at: str
     khr_per_usd: float
+    shop_name: Optional[str] = None   # added in v1.8
     items: list[ItemIn]
     history: list[HistoryRow]
     updated_at: dict[str, str] = {}
@@ -435,6 +474,7 @@ def backup():
         return Backup(
             created_at=now(),
             khr_per_usd=get_rate(conn),
+            shop_name=get_shop_name(conn),
             items=[ItemIn(**{k: r[k] for k in ItemIn.model_fields}) for r in items],
             history=[HistoryRow(**dict(r)) for r in hist],
             updated_at={r["barcode"]: r["updated_at"] for r in items},
@@ -471,6 +511,8 @@ def restore(data: Backup, confirm: bool = False):
             " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(data.khr_per_usd),),
         )
+        if data.shop_name:
+            set_setting(conn, "shop_name", data.shop_name)
         if data.sales is not None:
             conn.execute("DELETE FROM sale_items")
             conn.execute("DELETE FROM sales")

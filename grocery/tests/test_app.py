@@ -369,3 +369,15 @@ def test_photo_list_for_backup_and_item_delete(client):
     assert ph["222"]["kind"] == "link" and ph["222"]["name"] == "Rice"
     client.delete("/api/items/111")
     assert [p["barcode"] for p in client.get("/api/photos").json()] == ["222"]
+
+
+def test_shop_name_default_update_and_backup(client):
+    assert client.get("/api/settings/shop").json()["shop_name"] == "Gech Heng Wing Shop"
+    r = client.put("/api/settings/shop", json={"shop_name": "  Gech   Heng Wing Shop 2 "})
+    assert r.json()["shop_name"] == "Gech Heng Wing Shop 2"
+    assert client.put("/api/settings/shop", json={"shop_name": "   "}).status_code == 422
+    snap = client.get("/api/backup").json()
+    assert snap["shop_name"] == "Gech Heng Wing Shop 2"
+    client.put("/api/settings/shop", json={"shop_name": "Other"})
+    client.post("/api/restore?confirm=true", json=snap)
+    assert client.get("/api/settings/shop").json()["shop_name"] == "Gech Heng Wing Shop 2"

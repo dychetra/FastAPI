@@ -19,7 +19,7 @@
   body { margin:0; font-family:system-ui,-apple-system,"Segoe UI","Noto Sans Khmer",sans-serif;
          background:var(--bg); color:var(--ink); }
   header { background:var(--accent); color:var(--accent-ink); padding:12px 16px; }
-  header h1 { margin:0; font-size:18px; }
+  header h1 { margin:0; font-size:21px; }
   header small { opacity:.85; }
   nav { display:flex; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
   nav button { flex:1; padding:8px 2px; line-height:1.25; border:0; background:none; font:inherit; font-size:15px;
@@ -78,8 +78,8 @@
 </head>
 <body>
 <header>
-  <h1>ScanPrice · ស្កេនតម្លៃ</h1>
-  <small id="rateLabel">1 USD = … KHR</small>
+  <h1 id="shopName">Gech Heng Wing Shop</h1>
+  <small>ScanPrice · ស្កេនតម្លៃ · <span id="rateLabel">1 USD = … KHR</span></small>
 </header>
 <nav>
   <button data-tab="scan" class="on">📷 Scan<br><small>ស្កេន</small></button>
@@ -261,6 +261,13 @@
   <!-- ============ SETTINGS ============ -->
   <section id="tab-settings" class="hidden">
     <div class="card">
+      <label>Shop name · ឈ្មោះហាង</label>
+      <div class="row">
+        <input id="shopInput" maxlength="80" autocomplete="off">
+        <button class="btn primary" style="flex:0 0 auto" id="shopSave">Save · រក្សាទុក</button>
+      </div>
+    </div>
+    <div class="card">
       <label>Exchange rate · អត្រាប្តូរប្រាក់ (KHR per 1 USD)</label>
       <div class="row">
         <input id="rate" type="number" step="1" min="1">
@@ -313,6 +320,25 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
 });
 
 // ---------- rate ----------
+// ---------- shop name ----------
+function showShopName(name) {
+  $("#shopName").textContent = name; $("#shopInput").value = name;
+  document.title = name + " · ScanPrice";
+  localStorage.setItem("scanprice.shop", name);   // show instantly next time
+}
+showShopName(localStorage.getItem("scanprice.shop") || "Gech Heng Wing Shop");
+async function loadShop() {
+  try { showShopName((await api("/api/settings/shop")).shop_name); } catch {}
+}
+$("#shopSave").onclick = async () => {
+  const name = $("#shopInput").value.trim();
+  if (!name) return alert("Enter the shop name");
+  try {
+    const r = await api("/api/settings/shop", { method: "PUT", body: JSON.stringify({ shop_name: name }) });
+    showShopName(r.shop_name); flash("Shop name saved ✔");
+  } catch (err) { alert("Could not save: " + err.message); }
+};
+
 async function loadRate() {
   try { RATE = (await api("/api/settings/rate")).khr_per_usd; }
   catch (err) {
@@ -880,7 +906,7 @@ function flash(t, kind = "ok") {
   const f = $("#flash"); f.textContent = t; f.className = "msg " + kind;
   clearTimeout(flash.t); flash.t = setTimeout(() => f.classList.add("hidden"), 3500);
 }
-loadRate();
+loadRate(); loadShop();
 </script>
 </body>
 </html>
