@@ -137,4 +137,13 @@ def schema() -> list[str]:
             cost        {num}
         )""",
         "CREATE INDEX IF NOT EXISTS ix_sale_items_sale ON sale_items(sale_id)",
+        # product photo: either our own small JPEG (data) or a link to an online
+        # photo (url, e.g. Open Food Facts) which uses no space here
+        f"""CREATE TABLE IF NOT EXISTS item_photos (
+            barcode     TEXT PRIMARY KEY,
+            url         TEXT,
+            mime        TEXT,
+            data        {"BYTEA" if is_postgres() else "BLOB"},
+            updated_at  TEXT NOT NULL
+        )""",
     ]

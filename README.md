@@ -9,6 +9,8 @@ the item is new, type its name and price once and it is saved.
 - Optional **cost** → shows **margin %**; optional **stock qty** → stock value
 - **🧾 Sell screen**: scan items into a basket (camera keeps scanning), total in $ and ៛,
   change in riel or dollars + riel, stock counts down, today's sales and profit
+- **📷 Product photos**: online photo linked automatically, or take your own (shrunk on the
+  phone to ~30 KB); thumbnails in Scan, Items and Sell
 - **Price history** for every item; **CSV export** that opens in Excel (Khmer text OK)
 
 The app is in [`grocery/`](grocery/). It uses FastAPI with either:
@@ -89,8 +91,10 @@ uvicorn main:app --port 8000
    cd grocery
    python backup.py --url https://YOUR-APP.onrender.com --password YOUR_APP_PASSWORD --folder "G:\My Drive\Grocery backups"
    ```
-   Each run saves `grocery-backup-YYYY-MM-DD.json` (full backup) and
-   `grocery-prices-YYYY-MM-DD.csv` (opens in Excel). The last 60 days are kept.
+   Each run saves `grocery-backup-YYYY-MM-DD.json` (full backup, including sales),
+   `grocery-prices-YYYY-MM-DD.csv` (opens in Excel) and a `photos` folder with one
+   file per product photo (`<barcode> <name>.jpg`, only new/changed ones are downloaded).
+   The last 60 days of backups are kept.
    For Option A use `--url http://localhost:8000`.
 3. Make it automatic every evening (Windows):
    - copy `backup-to-drive.example.bat` to `backup-to-drive.bat` and fill in the URL, password and folder

@@ -1,3 +1,4 @@
+import base64
 import importlib
 import os
 
@@ -15,7 +16,7 @@ def make_client(tmp_path, monkeypatch, backend, password=""):
         monkeypatch.setenv("DATABASE_URL", url)
         import psycopg
         with psycopg.connect(url, autocommit=True) as c:
-            c.execute("DROP TABLE IF EXISTS items, price_history, settings, sales, sale_items")
+            c.execute("DROP TABLE IF EXISTS items, price_history, settings, sales, sale_items, item_photos")
     else:
         monkeypatch.delenv("DATABASE_URL", raising=False)
         monkeypatch.setenv("GROCERY_DB", str(tmp_path / "test.db"))
@@ -315,3 +316,56 @@ def test_sales_survive_backup_and_restore(client):
     assert r["restored_sales"] == 1
     d = client.get("/api/sales", params={"day": snap["sales"][0]["day"]}).json()
     assert d["sales"] == 1 and d["list"][0]["lines"][0]["qty"] == 2
+
+
+# ---------------- photos ----------------
+# an 8x8 red JPEG
+TINY_JPEG = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAAIAAgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDCooorzj7E/9k="
+
+
+def small_jpeg() -> bytes:
+    return base64.b64decode(TINY_JPEG)
+
+
+def test_upload_show_replace_and_delete_photo(client):
+    client.put("/api/items/111", json=item(barcode="111", name="Coke"))
+    assert client.get("/api/items/111").json()["photo_url"] is None
+    jpg = small_jpeg()
+    r = client.put("/api/items/111/photo", content=jpg, headers={"content-type": "image/jpeg"})
+    assert r.status_code == 200
+    url = r.json()["photo_url"]
+    assert url.startswith("/api/items/111/photo?v=")
+    got = client.get(url)
+    assert got.status_code == 200 and got.content == jpg
+    assert got.headers["content-type"] == "image/jpeg"
+    assert client.get("/api/items", params={"q": "coke"}).json()[0]["photo_url"] == url
+    # replace with an online link
+    link = "https://images.openfoodfacts.org/images/products/885/195/913/2012/front_en.36.200.jpg"
+    r = client.put("/api/items/111/photo-link", json={"url": link})
+    assert r.json()["photo_url"] == link
+    red = client.get("/api/items/111/photo", follow_redirects=False)
+    assert red.status_code == 307 and red.headers["location"] == link
+    assert client.delete("/api/items/111/photo").status_code == 204
+    assert client.get("/api/items/111").json()["photo_url"] is None
+
+
+def test_photo_validation(client):
+    client.put("/api/items/111", json=item(barcode="111"))
+    assert client.put("/api/items/111/photo", content=b"hello").status_code == 415
+    assert client.put("/api/items/111/photo", content=b"\xff\xd8\xff" + b"0" * 400_000).status_code == 413
+    assert client.put("/api/items/999/photo", content=small_jpeg()).status_code == 404
+    bad = client.put("/api/items/111/photo-link", json={"url": "https://evil.example/x.jpg"})
+    assert bad.status_code == 400
+
+
+def test_photo_list_for_backup_and_item_delete(client):
+    client.put("/api/items/111", json=item(barcode="111", name="Coke"))
+    client.put("/api/items/222", json=item(barcode="222", name="Rice"))
+    client.put("/api/items/111/photo", content=small_jpeg())
+    client.put("/api/items/222/photo-link",
+               json={"url": "https://images.openfoodfacts.org/images/x.jpg"})
+    ph = {p["barcode"]: p for p in client.get("/api/photos").json()}
+    assert ph["111"]["kind"] == "own" and ph["111"]["url"] == "/api/items/111/photo"
+    assert ph["222"]["kind"] == "link" and ph["222"]["name"] == "Rice"
+    client.delete("/api/items/111")
+    assert [p["barcode"] for p in client.get("/api/photos").json()] == ["222"]

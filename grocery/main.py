@@ -97,12 +97,21 @@ class ItemIn(BaseModel):
         return v.strip()
 
 
+# items joined with their photo (if any); use instead of "SELECT * FROM items"
+ITEM_SELECT = (
+    "SELECT items.*, p.url AS photo_link, p.updated_at AS photo_at, "
+    "CASE WHEN p.data IS NULL THEN 0 ELSE 1 END AS photo_own "
+    "FROM items LEFT JOIN item_photos p ON p.barcode = items.barcode"
+)
+
+
 class ItemOut(ItemIn):
     id: int
     price_usd: float
     price_khr: int
     margin_pct: Optional[float] = None
     updated_at: str
+    photo_url: Optional[str] = None   # own photo (served here) or online photo link
 
 
 class HistoryOut(BaseModel):
@@ -140,13 +149,28 @@ def to_out(row, rate: float) -> ItemOut:
         price_khr=khr,
         margin_pct=margin,
         updated_at=row["updated_at"],
+        photo_url=photo_url_of(row),
     )
+
+
+def _col(row, key):
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def photo_url_of(row) -> Optional[str]:
+    if _col(row, "photo_own"):
+        stamp = re.sub(r"\D", "", _col(row, "photo_at") or "")
+        return f"/api/items/{row['barcode']}/photo?v={stamp}"
+    return _col(row, "photo_link")
 
 
 # --------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.7.0"
 app = FastAPI(title="ScanPrice", version=APP_VERSION)
 # Start even if the database is briefly unreachable (e.g. Neon waking up or a
 # network blip): a crash here would take the whole app offline (Render 502).
@@ -237,16 +261,17 @@ def list_items(
     category: str = "",
     limit: int = Query(default=500, le=5000),
 ):
-    sql = "SELECT * FROM items WHERE 1=1"
+    sql = ITEM_SELECT + " WHERE 1=1"
     args: list = []
     if q:
-        sql += " AND (lower(name) LIKE ? OR barcode LIKE ? OR lower(category) LIKE ?)"
+        sql += (" AND (lower(items.name) LIKE ? OR items.barcode LIKE ?"
+                " OR lower(items.category) LIKE ?)")
         like = f"%{q.strip().lower()}%"
         args += [like, like, like]
     if category:
-        sql += " AND category = ?"
+        sql += " AND items.category = ?"
         args.append(category)
-    sql += " ORDER BY lower(name) LIMIT ?"
+    sql += " ORDER BY lower(items.name) LIMIT ?"
     args.append(limit)
     with db() as conn:
         rate = get_rate(conn)
@@ -256,7 +281,7 @@ def list_items(
 @app.get("/api/items/{barcode}", response_model=ItemOut)
 def get_item(barcode: str):
     with db() as conn:
-        row = conn.execute("SELECT * FROM items WHERE barcode=?", (barcode.strip(),)).fetchone()
+        row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode.strip(),)).fetchone()
         if not row:
             raise HTTPException(404, "Item not found")
         return to_out(row, get_rate(conn))
@@ -295,7 +320,7 @@ def save_item(barcode: str, item: ItemIn):
                 "INSERT INTO price_history(barcode,price,currency,changed_at) VALUES (?,?,?,?)",
                 (barcode, item.price, item.currency, ts),
             )
-        row = conn.execute("SELECT * FROM items WHERE barcode=?", (barcode,)).fetchone()
+        row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode,)).fetchone()
         return to_out(row, get_rate(conn))
 
 
@@ -306,6 +331,7 @@ def delete_item(barcode: str):
         if cur.rowcount == 0:
             raise HTTPException(404, "Item not found")
         conn.execute("DELETE FROM price_history WHERE barcode=?", (barcode.strip(),))
+        conn.execute("DELETE FROM item_photos WHERE barcode=?", (barcode.strip(),))
 
 
 @app.get("/api/items/{barcode}/history", response_model=list[HistoryOut])
@@ -356,7 +382,7 @@ def summary():
 def export_csv():
     with db() as conn:
         rate = get_rate(conn)
-        items = [to_out(r, rate) for r in conn.execute("SELECT * FROM items ORDER BY lower(name)")]
+        items = [to_out(r, rate) for r in conn.execute(ITEM_SELECT + " ORDER BY lower(items.name)")]
     buf = io.StringIO()
     buf.write("﻿")  # BOM so Excel shows Khmer text correctly
     w = csv.writer(buf)
@@ -776,3 +802,117 @@ def cancel_sale(sale_id: int):
                          (l["qty"], l["barcode"]))
         conn.execute("DELETE FROM sale_items WHERE sale_id=?", (sale_id,))
         conn.execute("DELETE FROM sales WHERE id=?", (sale_id,))
+
+
+# --------------------------------------------------------------------------
+# Product photos
+# --------------------------------------------------------------------------
+# The phone shrinks photos to ~400 px JPEG (~20-40 KB) before upload, so even
+# thousands fit easily in the free database. Online photos are only linked.
+MAX_PHOTO_BYTES = 300_000
+PHOTO_LINK_HOSTS = ("images.openfoodfacts.org", "images.openbeautyfacts.org",
+                    "images.openproductsfacts.org", "static.openfoodfacts.org")
+
+
+def image_type(data: bytes) -> Optional[str]:
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _need_item(conn, barcode: str) -> None:
+    if not conn.execute("SELECT id FROM items WHERE barcode=?", (barcode,)).fetchone():
+        raise HTTPException(404, "Item not found")
+
+
+def _store_photo(conn, barcode: str, url: Optional[str], mime: Optional[str],
+                 data: Optional[bytes]) -> None:
+    conn.execute("DELETE FROM item_photos WHERE barcode=?", (barcode,))
+    conn.execute(
+        "INSERT INTO item_photos(barcode,url,mime,data,updated_at) VALUES (?,?,?,?,?)",
+        (barcode, url, mime, data, now()))
+
+
+@app.put("/api/items/{barcode}/photo", response_model=ItemOut)
+async def upload_photo(barcode: str, request: Request):
+    """Body = the image file itself (JPEG/PNG/WebP, max 300 KB)."""
+    barcode = barcode.strip()
+    data = await request.body()
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(413, "Photo too large; the app shrinks photos before upload")
+    mime = image_type(data)
+    if not mime:
+        raise HTTPException(415, "Not a JPEG, PNG or WebP image")
+
+    def save():
+        with db() as conn:
+            _need_item(conn, barcode)
+            _store_photo(conn, barcode, None, mime, data)
+            row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode,)).fetchone()
+            return to_out(row, get_rate(conn))
+    return await run_in_threadpool(save)
+
+
+class PhotoLinkIn(BaseModel):
+    url: str = Field(max_length=500)
+
+
+@app.put("/api/items/{barcode}/photo-link", response_model=ItemOut)
+def link_photo(barcode: str, body: PhotoLinkIn):
+    """Use an online product photo (from the name lookup) without storing it."""
+    barcode = barcode.strip()
+    m = re.match(r"^https://([^/]+)/", body.url)
+    if not m or m.group(1) not in PHOTO_LINK_HOSTS:
+        raise HTTPException(400, "Only Open Food Facts photo links are allowed")
+    with db() as conn:
+        _need_item(conn, barcode)
+        _store_photo(conn, barcode, body.url, None, None)
+        row = conn.execute(ITEM_SELECT + " WHERE items.barcode=?", (barcode,)).fetchone()
+        return to_out(row, get_rate(conn))
+
+
+@app.get("/api/items/{barcode}/photo")
+def get_photo(barcode: str):
+    with db() as conn:
+        row = conn.execute("SELECT url,mime,data FROM item_photos WHERE barcode=?",
+                           (barcode.strip(),)).fetchone()
+    if not row:
+        raise HTTPException(404, "No photo")
+    if row["data"] is None:
+        return Response(status_code=307, headers={"Location": row["url"]})
+    # ?v=<time> in the link changes when the photo changes, so cache for long
+    return Response(bytes(row["data"]), media_type=row["mime"],
+                    headers={"Cache-Control": "private, max-age=31536000"})
+
+
+@app.delete("/api/items/{barcode}/photo", status_code=204)
+def delete_photo(barcode: str):
+    with db() as conn:
+        conn.execute("DELETE FROM item_photos WHERE barcode=?", (barcode.strip(),))
+
+
+class PhotoInfo(BaseModel):
+    barcode: str
+    name: str
+    kind: Literal["own", "link"]
+    url: str              # where to download it (own: this app; link: online)
+    updated_at: str
+
+
+@app.get("/api/photos", response_model=list[PhotoInfo])
+def list_photos():
+    """All photos, for backup.py to copy into the OneDrive / Google Drive folder."""
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT p.barcode, i.name, p.url, p.updated_at, "
+            "CASE WHEN p.data IS NULL THEN 0 ELSE 1 END AS own "
+            "FROM item_photos p JOIN items i ON i.barcode = p.barcode ORDER BY p.barcode"
+        ).fetchall()
+    return [PhotoInfo(barcode=r["barcode"], name=r["name"],
+                      kind="own" if r["own"] else "link",
+                      url=f"/api/items/{r['barcode']}/photo" if r["own"] else r["url"],
+                      updated_at=r["updated_at"]) for r in rows]

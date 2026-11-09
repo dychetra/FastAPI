@@ -68,6 +68,11 @@
   .qty { display:inline-flex; align-items:center; gap:6px; }
   .qty button { width:34px; height:34px; border:1px solid var(--line); border-radius:8px; background:#fff; font-size:18px; }
   .qty b { min-width:22px; text-align:center; }
+  .thumb { width:44px; height:44px; object-fit:contain; border-radius:6px; background:#fff;
+           border:1px solid var(--line); flex:0 0 auto; vertical-align:middle; }
+  .thumb.big { width:96px; height:96px; }
+  .thumb.sm { width:34px; height:34px; }
+  .namecell { display:flex; gap:8px; align-items:center; }
   .x { border:0; background:none; color:var(--bad); font-size:16px; cursor:pointer; }
 </style>
 </head>
@@ -112,6 +117,7 @@
     </div>
 
     <div id="result" class="card hidden">
+      <img id="rPhoto" class="thumb big hidden" alt="" style="float:right;margin-left:10px">
       <div class="item-name" id="rName"></div>
       <div class="price-big" id="rMain"></div>
       <div class="price-alt" id="rAlt"></div>
@@ -135,6 +141,15 @@
            style="text-decoration:none;color:inherit;text-align:center">🔍 Search name on Google</a>
         <button type="button" class="btn" id="retryBtn">↻ Try again</button>
       </div>
+      <label>Photo · រូបថត</label>
+      <div class="row" style="align-items:center">
+        <img id="fPhoto" class="thumb big hidden" alt="" style="flex:0 0 auto">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button type="button" class="btn" id="fPhotoBtn">📷 Add photo · ថតរូប</button>
+          <button type="button" class="btn danger hidden" id="fPhotoDel">Remove photo · លុបរូប</button>
+        </div>
+      </div>
+      <input id="fPhotoInput" type="file" accept="image/*" capture="environment" class="hidden">
       <label>Barcode · លេខបាកូដ</label>
       <input id="fBarcode" required>
       <label>Name · ឈ្មោះ</label>
@@ -325,8 +340,13 @@ async function lookup(code) {
   if (item) showItem(item);
   else { hide("#result"); openForm({ barcode: code }, true); }
 }
+function setImg(el, url) {
+  if (url) { el.src = url; el.classList.remove("hidden"); el.onerror = () => el.classList.add("hidden"); }
+  else { el.removeAttribute("src"); el.classList.add("hidden"); }
+}
 function showItem(it) {
   current = it;
+  setImg($("#rPhoto"), it.photo_url);
   $("#rName").textContent = it.name;
   const main = it.currency === "USD" ? usd(it.price_usd) : khr(it.price_khr);
   const alt = it.currency === "USD" ? "≈ " + khr(it.price_khr) : "≈ " + usd(it.price_usd);
@@ -376,6 +396,7 @@ async function openForm(it, isNew) {
   $("#fStock").value = it.stock ?? "";
   setCurrency(it.currency || "USD");
   $("#deleteBtn").classList.toggle("hidden", isNew);
+  pendingPhoto = null; showFormPhoto(it.photo_url || null);
   hide("#suggest");
   if (isNew) flash("New item — add the price · ទំនិញថ្មី សូមបញ្ចូលតម្លៃ", "warn");
   const s = await api("/api/summary");
@@ -399,7 +420,12 @@ async function suggestName(code) {
     if (!$("#fName").value.trim()) $("#fName").value = r.name;
     if (!$("#fCategory").value.trim() && r.category) $("#fCategory").value = r.category;
     $("#suggestText").innerHTML = `Found: <b>${esc(r.name)}</b><br><span class="meta">from ${esc(r.source)} — check the name, then enter the price</span>`;
-    if (r.image_url) { $("#suggestImg").src = r.image_url; show("#suggestImg"); }
+    if (r.image_url) {
+      $("#suggestImg").src = r.image_url; show("#suggestImg");
+      if (!pendingPhoto && $("#fPhoto").classList.contains("hidden")) {
+        pendingPhoto = { link: r.image_url }; showFormPhoto(r.image_url);
+      }
+    }
     $("#fPrice").focus();
     return;
   }
@@ -418,6 +444,49 @@ async function suggestName(code) {
   $("#fName").focus();
 }
 const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+// ---------- product photo ----------
+// The phone shrinks the photo to max 480 px JPEG (~20-40 KB) before upload.
+let pendingPhoto = null;   // {blob} | {link} | {remove: true} | null (no change)
+function showFormPhoto(url) {
+  setImg($("#fPhoto"), url);
+  $("#fPhotoDel").classList.toggle("hidden", !url);
+  $("#fPhotoBtn").textContent = url ? "📷 Change photo · ប្តូររូប" : "📷 Add photo · ថតរូប";
+}
+async function shrinkPhoto(file, maxSide = 480) {
+  let img;
+  try { img = await createImageBitmap(file, { imageOrientation: "from-image" }); }
+  catch { img = await createImageBitmap(file); }
+  const k = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(img, 0, 0, c.width, c.height);
+  for (const q of [0.75, 0.6, 0.45]) {
+    const blob = await new Promise(r => c.toBlob(r, "image/jpeg", q));
+    if (blob && blob.size <= 120000) return blob;
+  }
+  throw new Error("photo too large");
+}
+$("#fPhotoBtn").onclick = () => { $("#fPhotoInput").value = ""; $("#fPhotoInput").click(); };
+$("#fPhotoInput").onchange = async e => {
+  const file = e.target.files[0]; if (!file) return;
+  try {
+    const blob = await shrinkPhoto(file);
+    pendingPhoto = { blob }; showFormPhoto(URL.createObjectURL(blob));
+  } catch { alert("Could not read this photo. Try another one."); }
+};
+$("#fPhotoDel").onclick = () => { pendingPhoto = { remove: true }; showFormPhoto(null); };
+async function applyPhoto(barcode) {
+  const base = "/api/items/" + encodeURIComponent(barcode);
+  if (!pendingPhoto) return null;
+  const p = pendingPhoto; pendingPhoto = null;
+  if (p.remove) { await api(base + "/photo", { method: "DELETE" }); return api(base); }
+  if (p.link) return api(base + "/photo-link", { method: "PUT", body: JSON.stringify({ url: p.link }) });
+  const r = await fetch(base + "/photo", { method: "PUT", headers: { "Content-Type": "image/jpeg" }, body: p.blob });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
 $("#form").onsubmit = async e => {
   e.preventDefault();
   const body = {
@@ -426,7 +495,9 @@ $("#form").onsubmit = async e => {
     cost: num("#fCost"), stock: num("#fStock"),
   };
   try {
-    const it = await api("/api/items/" + encodeURIComponent(body.barcode), { method: "PUT", body: JSON.stringify(body) });
+    let it = await api("/api/items/" + encodeURIComponent(body.barcode), { method: "PUT", body: JSON.stringify(body) });
+    try { it = (await applyPhoto(body.barcode)) || it; }
+    catch (err) { alert("Item saved, but the photo could not be saved: " + err.message); }
     hide("#form"); showItem(it); flash("Saved ✔ · បានរក្សាទុក");
     $("#code").value = ""; $("#code").focus();
   } catch (err) { alert("Could not save: " + err.message); }
@@ -679,7 +750,8 @@ async function addToBasket(code) {
       $("#sellNewItem").onclick = () => { document.querySelector('nav button[data-tab="scan"]').click(); lookup(code); };
   }
   beep("found");
-  basket.push({ barcode: it.barcode, name: it.name, price: it.price, currency: it.currency, qty: 1 });
+  basket.push({ barcode: it.barcode, name: it.name, price: it.price, currency: it.currency,
+                photo_url: it.photo_url || null, qty: 1 });
   renderBasket(code);
 }
 
@@ -687,7 +759,8 @@ function renderBasket(flashCode) {
   localStorage.setItem("scanprice.basket", JSON.stringify(basket));
   $("#basket").innerHTML = basket.map((l, i) => `
     <tr${l.barcode === flashCode ? ' style="background:#ecfdf5"' : ""}>
-      <td><b>${esc(l.name)}</b><div class="meta">${money(l.price, l.currency)} each</div></td>
+      <td><div class="namecell">${l.photo_url ? `<img class="thumb sm" alt="" src="${esc(l.photo_url)}">` : ""}
+        <div><b>${esc(l.name)}</b><div class="meta">${money(l.price, l.currency)} each</div></div></div></td>
       <td class="num"><span class="qty"><button data-i="${i}" data-d="-1">−</button><b>${l.qty}</b><button data-i="${i}" data-d="1">+</button></span></td>
       <td class="num">${money(l.price * l.qty, l.currency)}</td>
       <td><button class="x" data-del="${i}" title="Remove">✕</button></td>
@@ -785,7 +858,8 @@ async function loadList() {
     s.categories.map(c => `<option ${c === sel ? "selected" : ""}>${esc(c)}</option>`).join("");
   $("#list").innerHTML = items.map(i => `
     <tr class="click" data-code="${esc(i.barcode)}">
-      <td><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(i.category) : ""}</div></td>
+      <td><div class="namecell">${i.photo_url ? `<img class="thumb" loading="lazy" alt="" src="${esc(i.photo_url)}">` : ""}
+        <div><b>${esc(i.name)}</b><div class="meta">${esc(i.barcode)}${i.category ? " · " + esc(i.category) : ""}</div></div></div></td>
       <td class="num">${usd(i.price_usd)}</td><td class="num">${khr(i.price_khr)}</td>
     </tr>`).join("");
   $("#listInfo").textContent = `${items.length} item(s)`;
